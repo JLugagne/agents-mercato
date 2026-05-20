@@ -746,7 +746,11 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 			if err != nil {
 				continue
 			}
-			dest := filepath.Join(localSkillDir, filepath.Base(f))
+			rel, err := filepath.Rel(skillDirPath, f)
+			if err != nil {
+				continue
+			}
+			dest := filepath.Join(localSkillDir, rel)
 			if err := w.WriteFile(dest, content); err != nil {
 				continue
 			}

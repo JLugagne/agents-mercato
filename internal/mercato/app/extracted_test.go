@@ -228,7 +228,56 @@ func TestInstallEntryFiles_DirBasedSkill(t *testing.T) {
 		t.Errorf("expected skill baz, got %v", files.Skills)
 	}
 	if len(writtenPaths) != 2 {
-		t.Errorf("expected 2 files written, got %d", len(writtenPaths))
+		t.Fatalf("expected 2 files written, got %d", len(writtenPaths))
+	}
+	if writtenPaths[0] != "/project/skills/baz/SKILL.md" {
+		t.Errorf("expected /project/skills/baz/SKILL.md, got %q", writtenPaths[0])
+	}
+	if writtenPaths[1] != "/project/skills/baz/helper.md" {
+		t.Errorf("expected /project/skills/baz/helper.md, got %q", writtenPaths[1])
+	}
+}
+
+func TestInstallEntryFiles_DirBasedSkill_PreservesSubdirs(t *testing.T) {
+	var writtenPaths []string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPaths = append(writtenPaths, path)
+			return nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{
+				"skills/baz/SKILL.md",
+				"skills/baz/references/structure.md",
+				"skills/baz/scripts/status.sh",
+			}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return []byte("file content for " + filePath), nil
+		},
+	}
+	a := newTestApp(&configstoretest.MockConfigStore{}, git, fsMock, &statestoretest.MockStateStore{})
+
+	files, _, err := a.installEntryFiles(directWriter{fs: fsMock}, "/clone", "main", "skills/baz/SKILL.md", "/project/skills/baz", []byte("unused"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files.Skills) != 1 || files.Skills[0] != "baz" {
+		t.Errorf("expected skill baz, got %v", files.Skills)
+	}
+	if len(writtenPaths) != 3 {
+		t.Fatalf("expected 3 files written, got %d", len(writtenPaths))
+	}
+	if writtenPaths[0] != "/project/skills/baz/SKILL.md" {
+		t.Errorf("expected /project/skills/baz/SKILL.md, got %q", writtenPaths[0])
+	}
+	if writtenPaths[1] != "/project/skills/baz/references/structure.md" {
+		t.Errorf("expected /project/skills/baz/references/structure.md, got %q", writtenPaths[1])
+	}
+	if writtenPaths[2] != "/project/skills/baz/scripts/status.sh" {
+		t.Errorf("expected /project/skills/baz/scripts/status.sh, got %q", writtenPaths[2])
 	}
 }
 

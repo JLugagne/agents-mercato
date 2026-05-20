@@ -497,7 +497,11 @@ func (a *App) installEntryFiles(w txWriter, clonePath, branch, relPath, localPat
 			if err != nil {
 				return files, written, err
 			}
-			fileDest := filepath.Join(localPath, filepath.Base(f))
+			rel, err := filepath.Rel(skillDirPath, f)
+			if err != nil {
+				return files, written, err
+			}
+			fileDest := filepath.Join(localPath, rel)
 			if err := w.WriteFile(fileDest, fileContent); err != nil {
 				return files, written, err
 			}

@@ -320,10 +320,12 @@ func (a *App) addInternal(
 	// Check if already installed at this location.
 	// Disk presence is the source of truth — pkg.Files is package-wide and
 	// can carry over from a sibling location after RemoveLocation.
+	// Allow re-install when --tools is specified so tool-only targets can
+	// be added to an existing claude-installed entry.
 	pkg := db.FindPackage(marketName, profile)
 	if pkg != nil {
 		atLocation := pkg.FindLocation(projectPath) != nil
-		if atLocation && a.entryFileExistsAt(cfg, relPath) {
+		if atLocation && a.entryFileExistsAt(cfg, relPath) && len(opts.Tools) == 0 {
 			return domain.ErrEntryAlreadyInstalled
 		}
 	}
@@ -742,6 +744,8 @@ func (a *App) addProfile(
 		// Check if already installed at this location.
 		// Disk presence is the source of truth — pkg.Files is package-wide
 		// and can carry over from a sibling location after RemoveLocation.
+		// Allow re-install when --tools is specified so tool-only targets can
+		// be added to an existing claude-installed entry.
 		pkg := db.FindPackage(marketName, fileProfile)
 		if pkg != nil {
 			atLocation := false
@@ -751,7 +755,7 @@ func (a *App) addProfile(
 					break
 				}
 			}
-			if atLocation && a.entryFileExistsAt(cfg, mf.Path) {
+			if atLocation && a.entryFileExistsAt(cfg, mf.Path) && len(opts.Tools) == 0 {
 				skippedCount++
 				continue
 			}

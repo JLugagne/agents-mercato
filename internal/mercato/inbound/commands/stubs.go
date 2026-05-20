@@ -300,6 +300,7 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			acceptBreaking, _ := cmd.Flags().GetBool("accept-breaking")
 			jsonOut, _ := cmd.Flags().GetBool("json")
+			toolsStr, _ := cmd.Flags().GetString("tools")
 			ref := domain.MctRef(args[0])
 			confirmMarket := func(marketURL string) bool {
 				if opts.CI {
@@ -310,11 +311,13 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 				_, _ = fmt.Fscan(cmd.InOrStdin(), &answer)
 				return answer == "y" || answer == "Y"
 			}
+			tools := parseToolsFlag(toolsStr)
 			result, err := svc.Entries.Add(ref, service.AddOpts{
 				NoDeps:         noDeps,
 				DryRun:         dryRun,
 				AcceptBreaking: acceptBreaking,
 				ConfirmMarket:  confirmMarket,
+				Tools:          tools,
 			})
 			if err != nil {
 				return err
@@ -343,7 +346,27 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 	cmd.Flags().Bool("dry-run", false, "preview install")
 	cmd.Flags().Bool("accept-breaking", false, "accept breaking changes")
 	cmd.Flags().Bool("json", false, "JSON output")
+	cmd.Flags().StringP("tools", "t", "", "target tools (comma-separated, e.g. opencode,cursor)")
 	return cmd
+}
+
+// parseToolsFlag converts a comma-separated tools string to a map[string]bool.
+func parseToolsFlag(s string) map[string]bool {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	m := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			m[p] = true
+		}
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
 }
 
 func newRestoreCmd(svc Services, opts *GlobalOpts) *cobra.Command {

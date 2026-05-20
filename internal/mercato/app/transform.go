@@ -59,9 +59,13 @@ type toolWriteResult struct {
 // writeToToolTargets transforms and writes the entry content to all enabled
 // tool targets via the supplied writer. It returns per-tool file records
 // (path + xxhash) and warnings. The Claude tool is skipped here since it is
-// handled by the existing code path.
-func (a *App) writeToToolTargets(w txWriter, entry domain.Entry, content []byte, projectDir string) toolWriteResult {
-	enabledTools := a.loadEnabledTools()
+// handled by the existing code path. If toolsOverride is non-nil, it is used
+// instead of the config-based tools.
+func (a *App) writeToToolTargets(w txWriter, entry domain.Entry, content []byte, projectDir string, toolsOverride map[string]bool) toolWriteResult {
+	enabledTools := toolsOverride
+	if enabledTools == nil {
+		enabledTools = a.loadEnabledTools()
+	}
 	if len(enabledTools) == 0 {
 		return toolWriteResult{}
 	}

@@ -386,7 +386,11 @@ func (a *App) addInternal(
 		Type:     entryType,
 		Profile:  profile,
 	}
-	twr := a.writeToToolTargets(w, entryForTransform, content, projectPath)
+	var toolsOverride map[string]bool
+	if len(opts.Tools) > 0 {
+		toolsOverride = opts.Tools
+	}
+	twr := a.writeToToolTargets(w, entryForTransform, content, projectPath, toolsOverride)
 
 	if result != nil {
 		mergeAddResult(result, twr)

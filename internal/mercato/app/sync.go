@@ -861,7 +861,7 @@ func (a *App) reTransformToolTargets(w txWriter, mc domain.MarketConfig, im *dom
 			Type:     domain.EntryTypeSkill,
 			Profile:  pkg.Profile,
 		}
-		accumulate(a.writeToToolTargets(w, entry, content, location))
+		accumulate(a.writeToToolTargets(w, entry, content, location, nil))
 	}
 
 	for _, agent := range files.Agents {
@@ -878,7 +878,7 @@ func (a *App) reTransformToolTargets(w txWriter, mc domain.MarketConfig, im *dom
 			Type:     domain.EntryTypeAgent,
 			Profile:  pkg.Profile,
 		}
-		accumulate(a.writeToToolTargets(w, entry, content, location))
+		accumulate(a.writeToToolTargets(w, entry, content, location, nil))
 	}
 
 	// Prune per-tool: files in old\new are gone from the new version.

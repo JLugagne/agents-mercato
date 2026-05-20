@@ -47,6 +47,7 @@ type AddOpts struct {
 	NoDeps         bool
 	DryRun         bool
 	ConfirmMarket  ConfirmMarketFunc
+	Tools          map[string]bool // per-invocation tool override (e.g. {"opencode": true})
 }
 
 type RemoveOpts struct {

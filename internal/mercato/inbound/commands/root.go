@@ -1,6 +1,9 @@
 package commands
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
@@ -46,8 +49,8 @@ func NewRootCmd(svc Services) *cobra.Command {
 	}
 
 	// Global flags
-	root.PersistentFlags().StringVar(&opts.ConfigPath, "config", "~/.config/mct/config.yml", "path to config file")
-	root.PersistentFlags().StringVar(&opts.CacheDir, "cache", "~/.cache/mct", "cache directory")
+	root.PersistentFlags().StringVar(&opts.ConfigPath, "config", defaultConfigPath(), "path to config file")
+	root.PersistentFlags().StringVar(&opts.CacheDir, "cache", defaultCacheDir(), "cache directory")
 	root.PersistentFlags().BoolVar(&opts.Offline, "offline", false, "disable network operations")
 	root.PersistentFlags().BoolVar(&opts.Verbose, "verbose", false, "detailed output")
 	root.PersistentFlags().BoolVar(&opts.Quiet, "quiet", false, "suppress all output except errors")
@@ -89,4 +92,20 @@ func NewRootCmd(svc Services) *cobra.Command {
 	root.AddCommand(newDistUpgradeCmd(opts))  // alias for upgrade
 
 	return root
+}
+
+func defaultConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.config/mct/config.yml"
+	}
+	return filepath.Join(home, ".config", "mct", "config.yml")
+}
+
+func defaultCacheDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.cache/mct"
+	}
+	return filepath.Join(home, ".cache", "mct")
 }

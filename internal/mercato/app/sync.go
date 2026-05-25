@@ -479,6 +479,7 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 		return nil, err
 	}
 
+	currentProject := projectPath(cfg.LocalPath)
 	var results []service.UpdateResult
 
 	for _, mc := range cfg.Markets {
@@ -529,6 +530,9 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 					continue
 				}
 				seen[location.Path] = true
+				if !opts.AllLocations && location.Path != currentProject {
+					continue
+				}
 				r := a.updatePackageAtLocation(updateCtx{
 					mc:        mc,
 					im:        im,
@@ -544,7 +548,6 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 			}
 		}
 	}
-
 	return results, nil
 }
 
@@ -739,7 +742,7 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 		if err != nil || len(dirFiles) == 0 {
 			continue
 		}
-		localSkillDir := filepath.Join(ctx.cfg.LocalPath, "skills", skill)
+		localSkillDir := filepath.Join(ctx.location, ".claude", "skills", skill)
 		wroteAny := false
 		for _, f := range dirFiles {
 			content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, f, "HEAD")
@@ -771,7 +774,7 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 		if err != nil {
 			continue
 		}
-		localPath := filepath.Join(ctx.cfg.LocalPath, "agents", agent)
+		localPath := filepath.Join(ctx.location, ".claude", "agents", agent)
 		if err := w.WriteFile(localPath, content); err != nil {
 			continue
 		}
@@ -788,7 +791,7 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 		if err != nil {
 			continue
 		}
-		localPath := filepath.Join(ctx.cfg.LocalPath, "commands", cmd)
+		localPath := filepath.Join(ctx.location, ".claude", "commands", cmd)
 		if err := w.WriteFile(localPath, content); err != nil {
 			continue
 		}
@@ -812,7 +815,7 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 			continue
 		}
 		ref := domain.MctRef(ctx.mc.Name + "@" + repoPath)
-		settingsAbsPath := filepath.Join(ctx.cfg.LocalPath, "settings.json")
+		settingsAbsPath := filepath.Join(ctx.location, ".claude", "settings.json")
 		if err := a.removeHookSnippet(w, ref, settingsAbsPath); err != nil {
 			continue
 		}

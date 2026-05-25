@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
@@ -1403,5 +1404,196 @@ func TestPackageFileRefs_IncludesCommands(t *testing.T) {
 	}
 	if len(want) > 0 {
 		t.Errorf("missing refs: %v (got %v)", want, refs)
+	}
+}
+
+func TestUpdate_AllLocationsFalse_FiltersLocations(t *testing.T) {
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return domain.Config{
+				LocalPath: ".claude",
+				Markets:   []domain.MarketConfig{{Name: "mkt", Branch: "main"}},
+			}, nil
+		},
+	}
+	state := &statestoretest.MockStateStore{
+		LoadSyncStateFn: func(cacheDir string) (domain.SyncState, error) {
+			return domain.SyncState{
+				Version: 1,
+				Markets: map[string]domain.MarketSyncState{
+					"mkt": {LastSyncedSHA: "oldhash"},
+				},
+			}, nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+			return []domain.FileDiff{
+				{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"},
+			}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			if commitSHA == "HEAD" {
+				return []byte("new content"), nil
+			}
+			return nil, errors.New("not found at ref")
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "newhash", nil
+		},
+	}
+
+	var writtenPaths []string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPaths = append(writtenPaths, path)
+			return nil
+		},
+		DeleteFileFn: func(path string) error { return nil },
+	}
+
+	currentProject := testProjectPath()
+
+	db := domain.InstallDatabase{
+		Markets: []domain.InstalledMarket{
+			{
+				Market: "mkt",
+				Packages: []domain.InstalledPackage{
+					{
+						Profile: "agents/foo.md",
+						Version: "oldhash",
+						Files:   domain.InstalledFiles{Agents: []string{"foo.md"}},
+						Locations: []domain.InstalledLocation{
+							{Path: currentProject, Type: domain.RuntimeTypeClaudeCode},
+							{Path: "/other/project", Type: domain.RuntimeTypeClaudeCode},
+						},
+					},
+				},
+			},
+		},
+	}
+	idb := idbWithData(db)
+
+	app := newTestApp(cfg, git, fsMock, state, idb)
+
+	results, err := app.Update(service.UpdateOpts{AllLocations: false})
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Action != "update" {
+		t.Errorf("expected Action=update, got %q", results[0].Action)
+	}
+	if results[0].Location != currentProject {
+		t.Errorf("expected Location=%q (current project), got %q", currentProject, results[0].Location)
+	}
+	if len(writtenPaths) == 0 {
+		t.Error("expected file writes, got none")
+	}
+	for _, p := range writtenPaths {
+		if strings.Contains(p, "/other/project") {
+			t.Errorf("wrote to wrong location: %q", p)
+		}
+	}
+}
+
+func TestUpdate_AllLocationsTrue_UpdatesAll(t *testing.T) {
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return domain.Config{
+				LocalPath: ".claude",
+				Markets:   []domain.MarketConfig{{Name: "mkt", Branch: "main"}},
+			}, nil
+		},
+	}
+	state := &statestoretest.MockStateStore{
+		LoadSyncStateFn: func(cacheDir string) (domain.SyncState, error) {
+			return domain.SyncState{
+				Version: 1,
+				Markets: map[string]domain.MarketSyncState{
+					"mkt": {LastSyncedSHA: "oldhash"},
+				},
+			}, nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+			return []domain.FileDiff{
+				{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"},
+			}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			if commitSHA == "HEAD" {
+				return []byte("new content"), nil
+			}
+			return nil, errors.New("not found at ref")
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "newhash", nil
+		},
+	}
+
+	var writtenPaths []string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPaths = append(writtenPaths, path)
+			return nil
+		},
+		DeleteFileFn: func(path string) error { return nil },
+	}
+
+	currentProject := testProjectPath()
+
+	db := domain.InstallDatabase{
+		Markets: []domain.InstalledMarket{
+			{
+				Market: "mkt",
+				Packages: []domain.InstalledPackage{
+					{
+						Profile: "agents/foo.md",
+						Version: "oldhash",
+						Files:   domain.InstalledFiles{Agents: []string{"foo.md"}},
+						Locations: []domain.InstalledLocation{
+							{Path: currentProject, Type: domain.RuntimeTypeClaudeCode},
+							{Path: "/other/project", Type: domain.RuntimeTypeClaudeCode},
+						},
+					},
+				},
+			},
+		},
+	}
+	idb := idbWithData(db)
+
+	app := newTestApp(cfg, git, fsMock, state, idb)
+
+	results, err := app.Update(service.UpdateOpts{AllLocations: true})
+	if err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results (both locations), got %d", len(results))
+	}
+	for _, r := range results {
+		if r.Action != "update" {
+			t.Errorf("expected Action=update for %q, got %q", r.Location, r.Action)
+		}
+	}
+	hasCurrent := false
+	hasOther := false
+	for _, p := range writtenPaths {
+		if strings.Contains(p, currentProject) {
+			hasCurrent = true
+		}
+		if strings.Contains(p, "/other/project") {
+			hasOther = true
+		}
+	}
+	if !hasCurrent {
+		t.Error("expected write to current project location")
+	}
+	if !hasOther {
+		t.Error("expected write to /other/project location")
 	}
 }

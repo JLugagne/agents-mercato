@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -654,5 +655,113 @@ func TestInstallEntryFiles_Command(t *testing.T) {
 	}
 	if written[0].XXH == "" {
 		t.Errorf("expected non-empty XXH hash")
+	}
+}
+
+func TestCopyUpdatedFiles_SkillsWithLocation(t *testing.T) {
+	var writtenPaths []string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPaths = append(writtenPaths, path)
+			return nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{dirPrefix + "/SKILL.md"}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return []byte("skill content"), nil
+		},
+	}
+
+	a := newTestApp(&configstoretest.MockConfigStore{}, git, fsMock, &statestoretest.MockStateStore{})
+
+	ctx := updateCtx{
+		mc:        domain.MarketConfig{Name: "mkt", Branch: "main"},
+		pkg:       &domain.InstalledPackage{Profile: "dev/go", Files: domain.InstalledFiles{Skills: []string{"bar"}}},
+		clonePath: "/cache/mkt",
+		location:  "/some/project",
+		cfg:       domain.Config{LocalPath: ".claude"},
+	}
+
+	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if len(files.Skills) != 1 || files.Skills[0] != "bar" {
+		t.Errorf("expected skill bar, got %v", files.Skills)
+	}
+	if len(writtenPaths) != 1 {
+		t.Fatalf("expected 1 write, got %d: %v", len(writtenPaths), writtenPaths)
+	}
+	want := filepath.Join("/some/project", ".claude", "skills", "bar", "SKILL.md")
+	if writtenPaths[0] != want {
+		t.Errorf("written path = %q, want %q", writtenPaths[0], want)
+	}
+}
+
+func TestCopyUpdatedFiles_AgentsWithLocation(t *testing.T) {
+	var writtenPath string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPath = path
+			return nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return []byte("agent content"), nil
+		},
+	}
+
+	a := newTestApp(&configstoretest.MockConfigStore{}, git, fsMock, &statestoretest.MockStateStore{})
+
+	ctx := updateCtx{
+		mc:        domain.MarketConfig{Name: "mkt", Branch: "main"},
+		pkg:       &domain.InstalledPackage{Profile: "dev/go", Files: domain.InstalledFiles{Agents: []string{"foo.md"}}},
+		clonePath: "/cache/mkt",
+		location:  "/some/project",
+		cfg:       domain.Config{LocalPath: ".claude"},
+	}
+
+	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if len(files.Agents) != 1 || files.Agents[0] != "foo.md" {
+		t.Errorf("expected agent foo.md, got %v", files.Agents)
+	}
+	want := filepath.Join("/some/project", ".claude", "agents", "foo.md")
+	if writtenPath != want {
+		t.Errorf("written path = %q, want %q", writtenPath, want)
+	}
+}
+
+func TestCopyUpdatedFiles_CommandsWithLocation(t *testing.T) {
+	var writtenPath string
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writtenPath = path
+			return nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return []byte("command content"), nil
+		},
+	}
+
+	a := newTestApp(&configstoretest.MockConfigStore{}, git, fsMock, &statestoretest.MockStateStore{})
+
+	ctx := updateCtx{
+		mc:        domain.MarketConfig{Name: "mkt", Branch: "main"},
+		pkg:       &domain.InstalledPackage{Profile: "dev/go", Files: domain.InstalledFiles{Commands: []string{"refactor.md"}}},
+		clonePath: "/cache/mkt",
+		location:  "/some/project",
+		cfg:       domain.Config{LocalPath: ".claude"},
+	}
+
+	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if len(files.Commands) != 1 || files.Commands[0] != "refactor.md" {
+		t.Errorf("expected command refactor.md, got %v", files.Commands)
+	}
+	want := filepath.Join("/some/project", ".claude", "commands", "refactor.md")
+	if writtenPath != want {
+		t.Errorf("written path = %q, want %q", writtenPath, want)
 	}
 }

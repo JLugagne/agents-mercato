@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"strings"
@@ -744,4 +745,355 @@ func keys[V any](m map[string]V) []string {
 		result = append(result, k)
 	}
 	return result
+}
+
+func TestMultiTool_InstallRecordsAllToolLocations(t *testing.T) {
+	var savedDBData []byte
+
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return domain.Config{
+				LocalPath: ".claude",
+				Markets:   []domain.MarketConfig{{Name: "mkt", URL: "https://example.com", Branch: "main"}},
+				Tools:     map[string]bool{"cursor": true, "opencode": true},
+			}, nil
+		},
+	}
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			if strings.Contains(path, "installed.json") {
+				savedDBData = content
+			}
+			return nil
+		},
+		StatFn: func(name string) (fs.FileInfo, error) {
+			return fakeFileInfo{isDir: true}, nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return skillFile(), nil
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "abc123", nil
+		},
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{dirPrefix + "/SKILL.md"}, nil
+		},
+	}
+	transformers := domain.TransformerRegistry{
+		"cursor":   cursorTransformer(),
+		"opencode": opencodeTransformer(),
+	}
+	idb := &installdbtest.MockInstallDB{
+		LockFn:   func(cacheDir string) error { return nil },
+		UnlockFn: func(cacheDir string) error { return nil },
+		LoadFn: func(cacheDir string) (domain.InstallDatabase, error) {
+			return domain.InstallDatabase{Markets: []domain.InstalledMarket{}}, nil
+		},
+		MarshalFn: func(db domain.InstallDatabase) ([]byte, error) {
+			return json.Marshal(db)
+		},
+		SaveFn: func(cacheDir string, db domain.InstallDatabase) error { return nil },
+	}
+
+	a := newMultiToolApp(cfg, git, fsMock, &statestoretest.MockStateStore{}, transformers, idb)
+
+	_, err := a.Add("mkt@skills/bar/SKILL.md", service.AddOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if savedDBData == nil {
+		t.Fatal("install DB was never written — missing installed.json write")
+	}
+
+	var savedDB domain.InstallDatabase
+	if err := json.Unmarshal(savedDBData, &savedDB); err != nil {
+		t.Fatalf("failed to parse saved install DB: %v", err)
+	}
+
+	im := savedDB.FindMarket("mkt")
+	if im == nil {
+		t.Fatal("market 'mkt' not found in saved install DB")
+	}
+	pkg := savedDB.FindPackage("mkt", "skills/bar")
+	if pkg == nil {
+		t.Fatal("package not found in saved install DB")
+	}
+
+	projectPath := testProjectPath()
+
+	var foundClaude, foundCursor, foundOpencode bool
+	for _, loc := range pkg.Locations {
+		if loc.Path != projectPath {
+			t.Errorf("unexpected location path %q, want %q", loc.Path, projectPath)
+		}
+		switch loc.Type {
+		case domain.RuntimeTypeClaudeCode:
+			foundClaude = true
+			if len(loc.Files) == 0 {
+				t.Error("ClaudeCode location should have files")
+			}
+		case "cursor":
+			foundCursor = true
+			if len(loc.Files) == 0 {
+				t.Error("cursor location should have files")
+			}
+		case "opencode":
+			foundOpencode = true
+			if len(loc.Files) == 0 {
+				t.Error("opencode location should have files")
+			}
+		default:
+			t.Errorf("unexpected location type %q", loc.Type)
+		}
+	}
+	if !foundClaude {
+		t.Error("install DB missing ClaudeCode location")
+	}
+	if !foundCursor {
+		t.Error("install DB missing cursor location")
+	}
+	if !foundOpencode {
+		t.Error("install DB missing opencode location")
+	}
+	if len(pkg.Locations) != 3 {
+		t.Errorf("expected 3 locations (claude + cursor + opencode), got %d", len(pkg.Locations))
+	}
+}
+
+func TestMultiTool_AddOptsToolsOverride_RecordsOnlySpecifiedTools(t *testing.T) {
+	var savedDBData []byte
+
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return domain.Config{
+				LocalPath: ".claude",
+				Markets:   []domain.MarketConfig{{Name: "mkt", URL: "https://example.com", Branch: "main"}},
+				Tools:     map[string]bool{"cursor": true, "opencode": true},
+			}, nil
+		},
+	}
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			if strings.Contains(path, "installed.json") {
+				savedDBData = content
+			}
+			return nil
+		},
+		StatFn: func(name string) (fs.FileInfo, error) {
+			return fakeFileInfo{isDir: true}, nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			return skillFile(), nil
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "abc123", nil
+		},
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{dirPrefix + "/SKILL.md"}, nil
+		},
+	}
+	transformers := domain.TransformerRegistry{
+		"cursor":   cursorTransformer(),
+		"opencode": opencodeTransformer(),
+	}
+	idb := &installdbtest.MockInstallDB{
+		LockFn:   func(cacheDir string) error { return nil },
+		UnlockFn: func(cacheDir string) error { return nil },
+		LoadFn: func(cacheDir string) (domain.InstallDatabase, error) {
+			return domain.InstallDatabase{Markets: []domain.InstalledMarket{}}, nil
+		},
+		MarshalFn: func(db domain.InstallDatabase) ([]byte, error) {
+			return json.Marshal(db)
+		},
+		SaveFn: func(cacheDir string, db domain.InstallDatabase) error { return nil },
+	}
+
+	a := newMultiToolApp(cfg, git, fsMock, &statestoretest.MockStateStore{}, transformers, idb)
+
+	result, err := a.Add("mkt@skills/bar/SKILL.md", service.AddOpts{Tools: map[string]bool{"cursor": true}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if savedDBData == nil {
+		t.Fatal("install DB was never written")
+	}
+
+	var savedDB domain.InstallDatabase
+	if err := json.Unmarshal(savedDBData, &savedDB); err != nil {
+		t.Fatalf("failed to parse saved install DB: %v", err)
+	}
+
+	pkg := savedDB.FindPackage("mkt", "skills/bar")
+	if pkg == nil {
+		t.Fatal("package not found in saved install DB")
+	}
+
+	var foundClaude, foundCursor, foundOpencode bool
+	for _, loc := range pkg.Locations {
+		switch loc.Type {
+		case domain.RuntimeTypeClaudeCode:
+			foundClaude = true
+		case "cursor":
+			foundCursor = true
+		case "opencode":
+			foundOpencode = true
+		}
+	}
+	if !foundClaude {
+		t.Error("install DB should always have ClaudeCode location")
+	}
+	if !foundCursor {
+		t.Error("install DB should have cursor location (explicitly overridden)")
+	}
+	if foundOpencode {
+		t.Error("install DB should NOT have opencode location (config enables it but Tools override limits to cursor only)")
+	}
+	if len(pkg.Locations) != 2 {
+		t.Errorf("expected 2 locations (claude + cursor), got %d", len(pkg.Locations))
+	}
+
+	_ = result
+}
+
+func TestMultiTool_UpdatePreservesToolLocations(t *testing.T) {
+	var savedDBData []byte
+
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return domain.Config{
+				LocalPath: ".claude",
+				Markets:   []domain.MarketConfig{{Name: "mkt", Branch: "main"}},
+				Tools:     map[string]bool{"cursor": true},
+			}, nil
+		},
+	}
+	state := &statestoretest.MockStateStore{
+		LoadSyncStateFn: func(cacheDir string) (domain.SyncState, error) {
+			return domain.SyncState{
+				Version: 1,
+				Markets: map[string]domain.MarketSyncState{
+					"mkt": {LastSyncedSHA: "oldhash"},
+				},
+			}, nil
+		},
+	}
+	git := &gitrepotest.MockGitRepo{
+		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+			return []domain.FileDiff{
+				{Action: domain.DiffModify, From: "skills/bar/SKILL.md", To: "skills/bar/SKILL.md"},
+			}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			if commitSHA == "HEAD" {
+				return skillFile(), nil
+			}
+			return nil, errors.New("not found at ref")
+		},
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{dirPrefix + "/SKILL.md"}, nil
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "newhash", nil
+		},
+	}
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			if strings.Contains(path, "installed.json") {
+				savedDBData = content
+			}
+			return nil
+		},
+		DeleteFileFn: func(path string) error { return nil },
+		StatFn: func(name string) (fs.FileInfo, error) {
+			return fakeFileInfo{isDir: true}, nil
+		},
+	}
+
+	projectPath := testProjectPath()
+	existingDB := domain.InstallDatabase{
+		Markets: []domain.InstalledMarket{
+			{
+				Market: "mkt",
+				Packages: []domain.InstalledPackage{
+					{
+						Profile: "skills/bar",
+						Version: "oldhash",
+						Files:   domain.InstalledFiles{Skills: []string{"bar"}},
+						Locations: []domain.InstalledLocation{
+							{Path: projectPath, Type: domain.RuntimeTypeClaudeCode},
+							{
+								Path:  projectPath,
+								Type:  "cursor",
+								Files: []domain.InstalledFile{{Path: ".cursor/skills/bar.md", XXH: "aaa"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	idb := &installdbtest.MockInstallDB{
+		LockFn:   func(cacheDir string) error { return nil },
+		UnlockFn: func(cacheDir string) error { return nil },
+		LoadFn: func(cacheDir string) (domain.InstallDatabase, error) {
+			return existingDB, nil
+		},
+		MarshalFn: func(db domain.InstallDatabase) ([]byte, error) {
+			return json.Marshal(db)
+		},
+		SaveFn: func(cacheDir string, db domain.InstallDatabase) error { return nil },
+	}
+
+	transformers := domain.TransformerRegistry{
+		"cursor": cursorTransformer(),
+	}
+	a := newMultiToolApp(cfg, git, fsMock, state, transformers, idb)
+
+	results, err := a.Update(service.UpdateOpts{AllMerge: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 update result")
+	}
+
+	if savedDBData == nil {
+		t.Fatal("install DB was never written after update")
+	}
+
+	var savedDB domain.InstallDatabase
+	if err := json.Unmarshal(savedDBData, &savedDB); err != nil {
+		t.Fatalf("failed to parse saved install DB: %v", err)
+	}
+
+	pkg := savedDB.FindPackage("mkt", "skills/bar")
+	if pkg == nil {
+		t.Fatal("package not found after update")
+	}
+
+	var foundClaude, foundCursor bool
+	for _, loc := range pkg.Locations {
+		switch loc.Type {
+		case domain.RuntimeTypeClaudeCode:
+			foundClaude = true
+		case "cursor":
+			foundCursor = true
+			if len(loc.Files) == 0 {
+				t.Error("cursor location should still have files after update")
+			}
+		}
+	}
+	if !foundClaude {
+		t.Error("ClaudeCode location missing after update")
+	}
+	if !foundCursor {
+		t.Error("cursor location missing after update — tool locations are not preserved")
+	}
+	if len(pkg.Locations) != 2 {
+		t.Errorf("expected 2 locations (claude + cursor) after update, got %d", len(pkg.Locations))
+	}
 }

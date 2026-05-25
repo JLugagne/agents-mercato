@@ -21,7 +21,7 @@ import (
 func isAgentOrSkillPath(path string) bool {
 	parts := strings.Split(filepath.ToSlash(path), "/")
 	for _, p := range parts {
-		if p == "agents" || p == "skills" {
+		if p == "agents" || p == "skills" || p == "commands" || p == "hooks" {
 			return true
 		}
 	}

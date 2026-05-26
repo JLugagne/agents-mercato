@@ -515,12 +515,28 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 			}
 
 			diffs, err := a.git.DiffSinceCommit(clonePath, mc.Branch, pkg.Version)
-			if err != nil {
-				continue
+			var affected map[int]*domain.InstalledPackage
+			if err == nil {
+				affected = a.findAffectedPackages(im, diffs, mc)
 			}
 
-			affected := a.findAffectedPackages(im, diffs, mc)
-			if _, ok := affected[pi]; !ok {
+			_, hasUpstreamChange := affected[pi]
+			shouldProcess := hasUpstreamChange
+			var driftedLocations map[string]struct{}
+			if !shouldProcess && (opts.AllMerge || opts.AllKeep) {
+				driftedLocations = make(map[string]struct{})
+				for _, loc := range pkg.Locations {
+					mod, del := a.detectDriftSplit(*pkg, loc.Path, clonePath, mc.Branch)
+					if len(mod) > 0 || len(del) > 0 {
+						driftedLocations[loc.Path] = struct{}{}
+					}
+				}
+				if len(driftedLocations) > 0 {
+					shouldProcess = true
+				}
+			}
+
+			if !shouldProcess {
 				continue
 			}
 
@@ -530,9 +546,15 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 					continue
 				}
 				seen[location.Path] = true
-				if !opts.AllLocations && location.Path != currentProject {
+
+				if !hasUpstreamChange && driftedLocations != nil {
+					if _, ok := driftedLocations[location.Path]; !ok {
+						continue
+					}
+				} else if !opts.AllLocations && location.Path != currentProject {
 					continue
 				}
+
 				r := a.updatePackageAtLocation(updateCtx{
 					mc:        mc,
 					im:        im,
@@ -548,6 +570,7 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 			}
 		}
 	}
+
 	return results, nil
 }
 

@@ -2080,3 +2080,70 @@ func TestResolveLocalPath_Command(t *testing.T) {
 		}
 	})
 }
+
+func TestAdd_ProfileExpand_SkipsSkillSubFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, ".claude")
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writePaths := []string{}
+
+	cfg := &configstoretest.MockConfigStore{
+		LoadFn: func(path string) (domain.Config, error) {
+			return cfgWithMarket("mkt", "https://example.com", "main", localPath), nil
+		},
+	}
+	fsMock := &filesystemtest.MockFilesystem{
+		WriteFileFn: func(path string, content []byte) error {
+			writePaths = append(writePaths, path)
+			return nil
+		},
+		MkdirAllFn: func(path string) error { return nil },
+	}
+
+	// Reference file has no frontmatter (starts with "# Heading"), which
+	// would cause ParseFrontmatter to fail if processed individually.
+	noFmFile := []byte("# Working on a task\n\nSome content.\n")
+
+	git := &gitrepotest.MockGitRepo{
+		ReadMarketFilesFn: func(clonePath, branch string) ([]gitrepo.MarketFile, error) {
+			return []gitrepo.MarketFile{
+				{Path: "dev/kanban/skills/kanban/SKILL.md", Content: skillFile()},
+				{Path: "dev/kanban/skills/kanban/references/working-on-task.md", Content: noFmFile},
+			}, nil
+		},
+		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+			if filePath == "dev/kanban/skills/kanban/SKILL.md" {
+				return skillFile(), nil
+			}
+			return noFmFile, nil
+		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) {
+			return "abc123", nil
+		},
+		ListDirFilesFn: func(clonePath, branch, dirPrefix string) ([]string, error) {
+			return []string{
+				dirPrefix + "/SKILL.md",
+				dirPrefix + "/references/working-on-task.md",
+			}, nil
+		},
+	}
+
+	idb := &installdbtest.MockInstallDB{
+		LockFn:   func(cacheDir string) error { return nil },
+		UnlockFn: func(cacheDir string) error { return nil },
+		LoadFn: func(cacheDir string) (domain.InstallDatabase, error) {
+			return domain.InstallDatabase{}, nil
+		},
+		SaveFn: func(cacheDir string, db domain.InstallDatabase) error { return nil },
+	}
+
+	a := newTestApp(cfg, git, fsMock, &statestoretest.MockStateStore{}, idb)
+
+	_, err := a.Add("mkt@dev/kanban", service.AddOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

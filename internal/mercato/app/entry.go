@@ -735,17 +735,15 @@ func (a *App) addProfile(
 		if isReadme(mf.Path) {
 			continue
 		}
+		if isDirBasedSkill(mf.Path) && !isSkillEntryPoint(mf.Path) {
+			continue
+		}
 		if mc.SkillsOnly && !isSkillPath(mf.Path, mc.SkillsPath) {
 			continue
 		}
 		fileRef := domain.MctRef(marketName + "@" + mf.Path)
 		fileProfile := refProfile(fileRef)
 
-		// Check if already installed at this location.
-		// Disk presence is the source of truth — pkg.Files is package-wide
-		// and can carry over from a sibling location after RemoveLocation.
-		// Allow re-install when --tools is specified so tool-only targets can
-		// be added to an existing claude-installed entry.
 		pkg := db.FindPackage(marketName, fileProfile)
 		if pkg != nil {
 			atLocation := false

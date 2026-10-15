@@ -352,6 +352,9 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 		RemoteHEADFn: func(clonePath, branch string) (string, error) {
 			return "newsha456", nil // different from installed version
 		},
+		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+			return []domain.FileDiff{{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"}}, nil
+		},
 		// Return error so drift detection skips all files (no drift)
 		ReadFileAtRefFn: func(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
 			return nil, errors.New("not found at ref")
@@ -388,6 +391,9 @@ func TestCheck_UpdateAndDrift(t *testing.T) {
 	git := &gitrepotest.MockGitRepo{
 		RemoteHEADFn: func(clonePath, branch string) (string, error) {
 			return "newsha456", nil // different from installed version => update available
+		},
+		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+			return []domain.FileDiff{{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"}}, nil
 		},
 	}
 	// File exists on disk but its hash will not match the recorded XXH.
@@ -677,7 +683,7 @@ func TestRefresh_UpdatesAvailable(t *testing.T) {
 	git := &gitrepotest.MockGitRepo{
 		FetchFn: func(clonePath, branch string) (string, error) { return "newhash", nil },
 		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
-			return nil, nil
+			return []domain.FileDiff{{Action: domain.DiffModify, From: "agents/a.md", To: "agents/a.md"}}, nil
 		},
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
 			return domain.MctVersion("v"), nil
@@ -874,6 +880,7 @@ func TestUpdate_DeletedEntrySkipped(t *testing.T) {
 				{Action: domain.DiffDelete, From: "agents/foo.md", To: ""},
 			}, nil
 		},
+		RemoteHEADFn: func(clonePath, branch string) (string, error) { return "newhash", nil },
 	}
 
 	db := installedDB("mkt", "agents/foo.md", "oldhash", domain.InstalledFiles{Agents: []string{"foo.md"}})
@@ -910,6 +917,7 @@ func TestUpdate_DriftAllKeep(t *testing.T) {
 		},
 	}
 	git := &gitrepotest.MockGitRepo{
+		RemoteHEADFn: func(clonePath, branch string) (string, error) { return "newhash", nil },
 		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
 			return []domain.FileDiff{
 				{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"},
@@ -1669,6 +1677,7 @@ func TestUpdate_DriftOnly_NoUpstream_AllKeep(t *testing.T) {
 		},
 	}
 	git := &gitrepotest.MockGitRepo{
+		RemoteHEADFn: func(clonePath, branch string) (string, error) { return "newhash", nil },
 		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
 			return nil, nil
 		},
@@ -1861,6 +1870,7 @@ func TestUpdate_NoDriftNoUpstream_AllMerge_Noop(t *testing.T) {
 		},
 	}
 	git := &gitrepotest.MockGitRepo{
+		RemoteHEADFn: func(clonePath, branch string) (string, error) { return "newhash", nil },
 		DiffSinceCommitFn: func(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
 			return nil, nil
 		},

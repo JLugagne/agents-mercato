@@ -1,63 +1,16 @@
 package app
 
 import (
-	"encoding/json"
-	"errors"
-	"os"
-
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 )
 
-// removeHookSnippet splices out every hook object whose mct_id matches the
-// recorded id for ref from .claude/settings.json. Empty event arrays and a
-// fully-empty hooks key are pruned. Sibling top-level keys are left alone.
-//
-// Tolerant: missing settings.json or missing entries are not errors — the
-// install record is the source of truth for "this ref was installed".
 func (a *App) removeHookSnippet(w txWriter, ref domain.MctRef, settingsAbsPath string) error {
-	mctID := mctIDForRef(ref)
-
-	existing, err := os.ReadFile(settingsAbsPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	doc, err := readSettings(existing)
+	st, err := loadHookState(w.ReadFile, settingsAbsPath)
 	if err != nil {
 		return err
 	}
-	hooks, err := doc.hooksByEvent()
-	if err != nil {
-		return err
-	}
-
-	changed := false
-	for event, list := range hooks {
-		filtered := make([]json.RawMessage, 0, len(list))
-		for _, obj := range list {
-			if extractMctID(obj) == mctID {
-				changed = true
-				continue
-			}
-			filtered = append(filtered, obj)
-		}
-		hooks[event] = filtered
-	}
-
-	if !changed {
-		return nil
-	}
-
-	if err := doc.setHooksByEvent(hooks); err != nil {
-		return err
-	}
-	out, err := doc.marshal()
-	if err != nil {
-		return err
-	}
-	return w.WriteFile(settingsAbsPath, out)
+	st.removeOwned(st.resolve(), mctIDForRef(ref))
+	return st.save(w, settingsAbsPath)
 }
 
 // dropHookFromPackage removes hookFile from pkg.Files.Hooks and from the
@@ -81,7 +34,7 @@ func (a *App) dropHookFromPackage(db *domain.InstallDatabase, market, profile, l
 
 	// Remove the per-location InstalledFile entry whose Path encodes this
 	// hookFile. Other hooks in the same package keep their entries.
-	loc := pkg.FindLocation(location)
+	loc := findLocationByPathAndType(pkg, location, domain.RuntimeTypeClaudeCode)
 	if loc != nil {
 		suffix := "#hooks/" + hookFile
 		filteredFiles := loc.Files[:0]

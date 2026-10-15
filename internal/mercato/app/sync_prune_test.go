@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
 	"io/fs"
 	"os"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/configstore/configstoretest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/filesystem/filesystemtest"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo/gitrepotest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/installdb/installdbtest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/statestore/statestoretest"
@@ -198,7 +198,7 @@ func TestRefresh_PrunesRemovedUpstreamFiles(t *testing.T) {
 		// "kept.md" still exists upstream, "gone.md" does not.
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
 			if strings.HasSuffix(filePath, "/gone.md") || filePath == "gone.md" {
-				return "", errors.New("not found")
+				return "", gitrepo.ErrFileNotFound
 			}
 			return domain.MctVersion("v"), nil
 		},
@@ -394,7 +394,7 @@ func pruneTestEnv(
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
 			for _, suf := range upstreamMissingSuffix {
 				if strings.HasSuffix(filePath, suf) {
-					return "", errors.New("not found")
+					return "", gitrepo.ErrFileNotFound
 				}
 			}
 			return domain.MctVersion("v"), nil
@@ -430,7 +430,7 @@ func pruneTestEnv(
 func TestRefresh_PrunesRemovedUpstreamSkill(t *testing.T) {
 	cfg, state, git, fsMock, deleted := pruneTestEnv(
 		map[string]bool{"/proj/alive": true},
-		nil,
+		[]string{"skills/gone.md"},
 		map[string]bool{"skills/kept": true}, // only "kept" still has upstream files
 	)
 

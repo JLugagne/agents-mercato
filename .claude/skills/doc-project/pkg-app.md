@@ -26,11 +26,44 @@ type App struct {
 ### Transactional install/update/remove
 
 Every write path opens a `tx.Tx` via `App.beginWriter(op)`. Writes go through
-a `txWriter` (wrapping the tx); reads continue to use `a.fs` directly. The
+a `txWriter` (wrapping the tx). `txWriter.ReadFile` sees the transaction's
+own pending writes/deletes, so read-modify-write sequences inside one tx
+(hook remove then re-install on `settings.json`) compose correctly; other
+reads use `a.fs` directly. The
 install database save is staged via `App.stageDBSave(w, db)` — `idb.Marshal`
 + `tx.WriteFile(idb.Path(...), data)` — so the DB lands atomically with the
 file changes. `commit()` promotes everything; on any error the deferred
 `rollback()` discards the staging dir.
+
+`App.RecoverPendingTx()` replays leftover staging dirs at startup, but only
+when it can take the install DB lock: every writer holds that lock for the
+lifetime of its tx, so a contended lock means the staging dir is live.
+
+### Sync versioning
+
+Each `InstalledLocation` carries its own `Version` (the market commit that
+project path was synced to); `InstalledPackage.VersionAt(path)` falls back to
+the package `Version` for legacy entries and `SetVersionAt` pins legacy
+siblings before moving one path forward. `Update` works per location:
+`hasUpstreamChange` diffs `VersionAt(location)..HEAD` and matches paths with
+`packageOwnsPath` (exact repo paths; skill directories by prefix). Entry-level
+deletions are left to `pruneRemovedUpstreamFiles`, which with `doctor` and
+`Prune` shares `removedUpstreamEntries`. `copyUpdatedFiles` aborts on any read
+failure that is not a confirmed upstream removal, strips `requires_skills`
+from agents (as `Add` does), and handles hooks plus nested skill files.
+
+Single-file skills (`skills/<name>.md`) are installed as
+`.claude/skills/<name>/SKILL.md` (`prepareFlatSkillDir` deletes a legacy
+extension-less file first). `skillEntryRepoPath` maps a package skill back to
+its repo path (flat when listed in `Files.FlatSkills` or when the profile is
+the `.md` file itself), used by `List`, `packageFileRefs` and
+`reTransformToolTargets`; drift and `RestoreDeleted` fall back to the flat
+path when the skill directory does not exist upstream.
+
+`List` and `Check` load the DB through `loadInstallDBWithoutStale`: stale
+locations are detected on an unlocked load, then the DB is reloaded under the
+install lock before the cleanup is saved, so a concurrent write is never
+overwritten. When the lock is busy the cleanup stays in memory only.
 
 Granularity is **per-package**: each top-level `Add`/`Update`-at-location/
 `Remove`/`Prune` opens its own transaction. Recursive dependency installs
@@ -79,7 +112,7 @@ Implements `SyncQueries` + `SyncCommands`.
 | `Check(opts)` | Compute EntryState for all installed entries (clean/update/drift/deleted/orphaned) |
 | `Refresh(opts)` | Prune stale install-DB locations, fetch from each market, then for each fetched market run upstream-removed file pruning. Surfaces `PrunedLocations` and `PrunedFiles` in `RefreshResult`. |
 | `pruneStaleLocations()` | DB-only cleanup: walks `installed.json`, drops every `Location` whose project dir no longer exists (uses `InstallDatabase.RemoveLocation` cascade), then stages an atomic DB save via the tx writer. No file deletion — files are already gone. Skipped on `DryRun`. Uses `a.fs.Stat` so the check is fully fakeable. |
-| `pruneRemovedUpstreamFiles(market, branch, clonePath)` | Per market, after fetch: walks every installed package, checks `pkg.Files.{Skills,Agents,Commands,Hooks}` against the clone at HEAD. Each missing entry is deleted on disk across **all** locations (skills via `DeleteAll`, agents/commands via `DeleteFile`, hooks via `removeHookSnippet` to splice `settings.json` by `mct_id`), removed from `pkg.Files`, removed from each `loc.Files`, and packages that become empty are dropped. Atomic via the tx writer. Skipped on `DryRun`. |
+| `pruneRemovedUpstreamFiles(market, branch, clonePath)` | Per market, after fetch: walks every installed package, checks `pkg.Files.{Skills,Agents,Commands,Hooks}` against the clone at HEAD. Each missing entry is deleted on disk across **all** locations (skills via `DeleteAll`, agents/commands via `DeleteFile`, hooks via `removeHookSnippet`, which drops the matcher group owned by the ref (ownership from `.claude/mct-hooks.json`)), removed from `pkg.Files`, removed from each `loc.Files`, and packages that become empty are dropped. Atomic via the tx writer. Skipped on `DryRun`. |
 | `detectDriftSplit(pkg, location, clonePath, branch)` | Single source of truth for drift detection — returns `(modified, deleted []string)`. Modified = file present but xxhash mismatches recorded value. Deleted = file is `os.IsNotExist` (user removed it). All filesystem reads go through `a.fs` so v2 (per-location hash) and legacy (git-comparison) paths share identical fakeable I/O. `detectDrift` is now a thin wrapper returning the union for legacy callers (`Update`). |
 | `DetectDeleted(opts)` | Read-only scan of installed files that are missing on disk. Excludes hook entries (their "presence" is in settings.json, not a standalone file). Returns `[]DeletedFile` with `(market, profile, location, relPath, xxh)`. Used by `mct sync` between Refresh and Update to drive the interactive restore prompt. |
 | `RestoreDeleted(files, opts)` | Reinstalls each `DeletedFile` by reading its content from the cached clone at the recorded `pkg.Version` and writing it back through the tx writer. Groups by `(market, profile, location)` so each package commit is atomic. `DryRun` returns `would_restore` actions without writing. Failures: `errMarketNotFound`, `errPackageNotFound`, `errUnknownFileShape`. |
@@ -88,7 +121,19 @@ Implements `SyncQueries` + `SyncCommands`.
 | `copyUpdatedFiles(w, ctx)` | Reads updated files from the cached clone at HEAD and writes them to the local project — paths are built from `ctx.location/.claude/{skills,agents,commands,settings.json}` so each installed location gets the correct files. |
 | `Sync(opts)` | Combined Refresh + Update |
 | `detectDrift()` | Compare local file xxhash vs upstream content at recorded version |
-| `pruneRemovedFiles()` | Diff old vs. new `[]InstalledFile`, delete `old\new` from disk, walk parent dirs and remove any that become empty (stops at project root). Called by `updatePackageAtLocation` (claude-code) and `reTransformToolTargets` (per tool) so files dropped upstream don't linger. |
+| `pruneRemovedFiles()` | Diff old vs. new `[]InstalledFile`, delete `old\new` from disk, walk parent dirs and remove any that become empty (stops at project root). Called by `updatePackageAtLocation` (claude-code) so files dropped upstream don't linger; tool files use `syncToolFiles`. |
+
+### hook_*.go — Hook Entries (settings.json)
+
+| File | Role |
+|------|------|
+| `hook_owners.go` | `hookState`: settings doc + `hooks` map + ownership sidecar `.claude/mct-hooks.json` (`mct_id` → `hookOwner{Ref, Event, Matcher, Hooks}`). `loadHookState(w.ReadFile, settings)` / `parseHookState` migrate legacy flat `mct_id` entries into matcher groups; `resolve()` maps owners to groups (exact match, then single same-matcher/same-handler-types candidate); `conflicts`, `removeOwned`, `add`, `save` (writes settings and sidecar through the txWriter, deletes an empty sidecar). `hookChecksum(matcher, handlers)` is the drift checksum (matcher folded into each handler so legacy recorded checksums still match). |
+| `hook_install.go` | `installHookSnippet` (conflict check, replace own group, append `{"matcher","hooks"}` group, record `<settings.json>#hooks/<file>` checksum) and `addHook` (tx + install DB). |
+| `hook_remove.go` | `removeHookSnippet` (drop owned group + sidecar record, empty events/hooks key pruned), `dropHookFromPackage`. |
+| `hook_drift.go` | `detectHookDrift` resolves each installed hook through the sidecar and compares `hookChecksum` with the recorded XXH; unresolved = drift. |
+| `hook_settings.go` | `settingsDoc` (sibling keys round-tripped verbatim), canonical JSON helpers, `mctIDForRef`. |
+
+Claude Code's settings schema (`additionalProperties: false` on matcher groups and handlers) is why ownership is not stored inside `settings.json`.
 
 ### search.go — Full-Text Search
 
@@ -120,3 +165,44 @@ Helpers: `buildCorpus()`, `filterEntries()`, `buildProfileDoc()`, `tokenize()`, 
 |--------|-------------|
 | `Readme(market, path)` | Read specific profile README |
 | `ListReadmes(market)` | List all READMEs in market |
+
+## Multi-tool integration (`transform.go`, `tool_hooks.go`)
+
+- `writeToToolTargets(w, entry, content, assets, projectDir, toolsOverride)`:
+  runs every enabled + detected transformer, writes files (shared `.agents/`
+  paths once, recorded under type `agents`), applies `HookPatch`es
+  (`applyHookPatch`: idempotent append, canonical JSON recorded in `Data`).
+  Returns per-tool `InstalledFile` records (with `Source`) and warnings.
+- `recordToolFiles` merges them for incremental adds (`Add`, `addHook`).
+- `removeToolFiles(w, pkg, projectDir, source)` deletes recorded artefacts
+  (skill dirs whole, hook patches spliced out with `removeHookPatch`, empty
+  JSON docs deleted); used by `Remove`, hook removal and
+  `pruneRemovedUpstreamFiles`.
+- `reTransformToolTargets` (update) re-transforms skills (with assets),
+  agents, commands and hooks, then `syncToolFiles` replaces the tool records
+  and deletes artefacts no longer produced (dropped entries, disabled tools,
+  tools removed from mct); a file whose content no longer matches its recorded hash is kept with a warning instead. Warnings surface in `UpdateResult.Warnings` and are printed by `update`/`sync`.
+- `detectToolDrift` compares recorded files/patches with disk (per `Source`).
+- `checkToolName` rejects unknown names in `SetConfigField("tools.x")` and
+  `AddOpts.Tools`.
+
+## Migration of older layouts (`migrate.go`)
+
+`Migrate(MigrateOpts{AllLocations, DryRun})` converts files written by older
+mct versions, one transaction per project location, under the install lock:
+
+- single-file skills stored as an extension-less `.claude/skills/<name>` file
+  → `.claude/skills/<name>/SKILL.md`, keeping the local content (local edits
+  stay visible as drift); the record path is rewritten and `FlatSkills` set;
+- legacy flat hook entries (`mct_id`) in `.claude/settings.json` → matcher
+  groups + `mct-hooks.json` (via `loadHookState`/`save`);
+- tool outputs whose records have no `Source` or whose tool no longer exists
+  → regenerated with `reTransformToolTargets` at the location's recorded
+  version (`VersionAt`), obsolete outputs deleted; files modified locally are
+  neither overwritten nor deleted (warning instead).
+
+It is idempotent (second run returns nothing). `Update` (and therefore
+`Sync`) runs it first for the current project (or all locations with
+`AllLocations`) and reports each migrated package as an `UpdateResult` with
+Action `migrated` / `would_migrate` and `Details`. `DryRun` uses a
+`dryRunWriter` that reads from disk and discards writes.

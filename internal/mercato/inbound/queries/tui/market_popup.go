@@ -34,13 +34,16 @@ func newMarketPopup() MarketPopup {
 }
 
 func (p *MarketPopup) load(markets []domain.Market) {
-	p.markets = markets
 	p.action = MarketActionNone
 	p.errMsg = ""
+	p.setMarkets(markets)
+}
+
+func (p *MarketPopup) setMarkets(markets []domain.Market) {
+	p.markets = markets
 	if p.cursor >= len(markets) {
 		p.cursor = max(0, len(markets)-1)
 	}
-	// Preserve existing selections; newly added markets start selected.
 	if p.selected == nil {
 		p.selected = make(map[string]bool)
 	}

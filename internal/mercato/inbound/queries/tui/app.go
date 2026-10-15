@@ -2,10 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
@@ -35,6 +37,7 @@ type AppModel struct {
 	filteredEntries      []EntryItem
 	allProfiles          []ProfileItem
 	searchQuery          string
+	searchSeq            int64
 	selectedEntryContent string
 	selectedEntryRef     domain.MctRef
 	statusByRef          map[domain.MctRef]domain.EntryState
@@ -114,11 +117,19 @@ func (m AppModel) Init() tea.Cmd {
 
 func (m AppModel) loadAllMarkets() tea.Cmd {
 	return func() tea.Msg {
+		markets, mErr := m.svc.Markets.ListMarkets()
 		results, err := m.svc.Search.Search("", service.SearchOpts{})
 		if err != nil {
-			return IndexReadyMsg{Elapsed: 0}
+			return IndexReadyMsg{Markets: markets, MarketsErr: mErr}
 		}
-		return IndexReadyMsg{Results: results, Elapsed: 0}
+		return IndexReadyMsg{Results: results, Markets: markets, MarketsErr: mErr}
+	}
+}
+
+func (m AppModel) listMarketsCmd() tea.Cmd {
+	return func() tea.Msg {
+		markets, err := m.svc.Markets.ListMarkets()
+		return MarketsListedMsg{Markets: markets, Err: err}
 	}
 }
 
@@ -159,9 +170,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.filteredEntries = m.allEntries
 		m.recomputeMarketStats()
-		m.skillsOnlyMarkets = make(map[string]bool)
-		if markets, err := m.svc.Markets.ListMarkets(); err == nil {
-			for _, mk := range markets {
+		if msg.MarketsErr == nil || m.skillsOnlyMarkets == nil {
+			m.skillsOnlyMarkets = make(map[string]bool)
+			for _, mk := range msg.Markets {
 				if mk.SkillsOnly {
 					m.skillsOnlyMarkets[mk.Name] = true
 				}
@@ -194,7 +205,22 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateProfilesList()
 		return m, nil
 
+	case SearchTickMsg:
+		if msg.Seq != m.searchSeq || msg.Query != m.searchQuery {
+			return m, nil
+		}
+		return m, m.searchCmd(msg.Query)
+
+	case MarketsListedMsg:
+		if msg.Err == nil {
+			m.marketPopup.setMarkets(msg.Markets)
+		}
+		return m, nil
+
 	case SearchResultMsg:
+		if msg.Query != m.searchQuery {
+			return m, nil
+		}
 		m.searching = false
 		m.filteredEntries = make([]EntryItem, len(msg.Results))
 		for i, r := range msg.Results {
@@ -250,18 +276,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.marketPopup.errMsg = msg.Err.Error()
 			return m, nil
 		}
-		markets, _ := m.svc.Markets.ListMarkets()
-		m.marketPopup.load(markets)
-		return m, m.loadAllMarkets()
+		m.marketPopup.load(m.marketPopup.markets)
+		return m, tea.Batch(m.listMarketsCmd(), m.loadAllMarkets())
 
 	case MarketRemovedMsg:
 		if msg.Err != nil {
 			m.marketPopup.errMsg = msg.Err.Error()
 			return m, nil
 		}
-		markets, _ := m.svc.Markets.ListMarkets()
-		m.marketPopup.load(markets)
-		return m, m.loadAllMarkets()
+		m.marketPopup.load(m.marketPopup.markets)
+		return m, tea.Batch(m.listMarketsCmd(), m.loadAllMarkets())
 
 	case SkillDirFilesMsg:
 		if msg.Err != nil {
@@ -383,9 +407,8 @@ func (m *AppModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "m":
 		m.mode = ModeMarketPopup
-		markets, _ := m.svc.Markets.ListMarkets()
-		m.marketPopup.load(markets)
-		return m, nil
+		m.marketPopup.load(m.marketPopup.markets)
+		return m, m.listMarketsCmd()
 	case "i":
 		item, ok := m.profilesList.SelectedItem().(ProfileItem)
 		if !ok {
@@ -484,6 +507,9 @@ func (m *AppModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = ModeNormal
 		m.searchInput.Blur()
 		m.searchInput.Reset()
+		m.searchQuery = ""
+		m.searchSeq++
+		m.searching = false
 		m.filteredEntries = m.allEntries
 		m.updateProfilesList()
 		m.updateEntriesList()
@@ -496,11 +522,15 @@ func (m *AppModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.searchInput, cmd = m.searchInput.Update(msg)
+	if m.searchInput.Value() == m.searchQuery {
+		return m, cmd
+	}
 	m.searchQuery = m.searchInput.Value()
+	m.searchSeq++
 
 	if m.searchQuery != "" {
 		m.searching = true
-		return m, tea.Batch(cmd, m.searchCmd(m.searchQuery))
+		return m, tea.Batch(cmd, searchDebounceCmd(m.searchSeq, m.searchQuery))
 	}
 	m.searching = false
 	m.filteredEntries = m.allEntries
@@ -577,6 +607,14 @@ func (m *AppModel) profileRemoveCmd(p ProfileItem) tea.Cmd {
 		}
 		return ProfileRemoveMsg{Profile: p.Name, Errors: errs}
 	}
+}
+
+const searchDebounce = 150 * time.Millisecond
+
+func searchDebounceCmd(seq int64, query string) tea.Cmd {
+	return tea.Tick(searchDebounce, func(time.Time) tea.Msg {
+		return SearchTickMsg{Seq: seq, Query: query}
+	})
 }
 
 func (m *AppModel) searchCmd(query string) tea.Cmd {
@@ -759,11 +797,18 @@ func (m AppModel) colWidths() (w1, w2, w3 int) {
 	return
 }
 
+func (m AppModel) panelHeight() int {
+	return max(m.height-4, 1)
+}
+
+func rightPanelHeights(h int) (entriesH, contentH int) {
+	innerTotal := max(h+2-4, 0)
+	entriesH = innerTotal / 3
+	return entriesH, innerTotal - entriesH
+}
+
 func (m *AppModel) updateLayout() {
-	h := m.height - 4
-	if h < 1 {
-		h = 1
-	}
+	h := m.panelHeight()
 
 	w1, w2, w3 := m.colWidths()
 
@@ -775,10 +820,7 @@ func (m *AppModel) updateLayout() {
 	}
 
 	if w3 > 0 {
-		panelH := h + 2
-		innerTotal := panelH - 4
-		entriesH := innerTotal / 3
-		contentH := innerTotal - entriesH
+		entriesH, contentH := rightPanelHeights(h)
 		m.entriesList.SetSize(w3-2, entriesH)
 		m.contentView.Width = w3 - 4
 		m.contentView.Height = contentH
@@ -791,7 +833,7 @@ func (m AppModel) View() string {
 	}
 
 	var panels []string
-	h := m.height - 4
+	h := m.panelHeight()
 	w1, w2, w3 := m.colWidths()
 	panelH := h + 2 // total outer height per column (inner h + 2 for border)
 
@@ -815,11 +857,7 @@ func (m AppModel) View() string {
 
 	// Right panel: entries list (top) + content (bottom)
 	if w3 > 0 {
-		// Two bordered sub-panels must sum to panelH.
-		// Each border adds 2, so inner heights sum to panelH - 4.
-		innerTotal := panelH - 4
-		entriesH := innerTotal / 3
-		contentH := innerTotal - entriesH
+		entriesH, contentH := rightPanelHeights(h)
 
 		entriesStyle := StyleBorder
 		if m.focus == FocusEntries {
@@ -1021,11 +1059,46 @@ type mdCacheKey struct {
 	md    string
 }
 
+const (
+	mdRenderCacheMax = 256
+	mdRenderersMax   = 8
+)
+
 var (
-	mdRenderers   = make(map[int]*glamour.TermRenderer)
-	mdRenderCache = make(map[mdCacheKey]string)
+	mdRenderers   = newBoundedCache[int, *glamour.TermRenderer](mdRenderersMax)
+	mdRenderCache = newBoundedCache[mdCacheKey, string](mdRenderCacheMax)
 	mdRendererMu  sync.Mutex
 )
+
+type boundedCache[K comparable, V any] struct {
+	max   int
+	items map[K]V
+	order []K
+}
+
+func newBoundedCache[K comparable, V any](max int) *boundedCache[K, V] {
+	return &boundedCache[K, V]{max: max, items: make(map[K]V, max)}
+}
+
+func (c *boundedCache[K, V]) get(k K) (V, bool) {
+	v, ok := c.items[k]
+	return v, ok
+}
+
+func (c *boundedCache[K, V]) put(k K, v V) {
+	if _, ok := c.items[k]; ok {
+		c.items[k] = v
+		return
+	}
+	if len(c.order) >= c.max {
+		delete(c.items, c.order[0])
+		c.order = slices.Delete(c.order, 0, 1)
+	}
+	c.items[k] = v
+	c.order = append(c.order, k)
+}
+
+func (c *boundedCache[K, V]) len() int { return len(c.items) }
 
 func renderMarkdown(md string, width int) string {
 	if width < 1 {
@@ -1035,11 +1108,11 @@ func renderMarkdown(md string, width int) string {
 	defer mdRendererMu.Unlock()
 
 	key := mdCacheKey{width: width, md: md}
-	if cached, ok := mdRenderCache[key]; ok {
+	if cached, ok := mdRenderCache.get(key); ok {
 		return cached
 	}
 
-	r, ok := mdRenderers[width]
+	r, ok := mdRenderers.get(width)
 	if !ok {
 		var err error
 		r, err = glamour.NewTermRenderer(
@@ -1049,14 +1122,14 @@ func renderMarkdown(md string, width int) string {
 		if err != nil {
 			return md
 		}
-		mdRenderers[width] = r
+		mdRenderers.put(width, r)
 	}
 	out, err := r.Render(md)
 	if err != nil {
 		return md
 	}
 	result := strings.TrimSpace(out)
-	mdRenderCache[key] = result
+	mdRenderCache.put(key, result)
 	return result
 }
 

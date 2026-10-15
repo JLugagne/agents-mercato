@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -409,18 +410,21 @@ func inferCategory(relPath string) string {
 	return profilePrefix(relPath)
 }
 
-// stemmer is a package-level reusable Snowball stemmer for English.
-// Not safe for concurrent use, but search is single-goroutine.
-var stemmer, _ = snowball.NewStemmer("english",
-	snowball.WithoutToLower(),
-	snowball.WithoutTrimSpace(),
-)
+var stemmers = sync.Pool{New: func() any {
+	s, _ := snowball.NewStemmer("english",
+		snowball.WithoutToLower(),
+		snowball.WithoutTrimSpace(),
+	)
+	return s
+}}
 
 func tokenize(text string) []string {
 	lower := strings.ToLower(text)
 	words := strings.FieldsFunc(lower, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+	stemmer := stemmers.Get().(*snowball.Stemmer)
+	defer stemmers.Put(stemmer)
 	tokens := make([]string, 0, len(words))
 	for _, w := range words {
 		if w == "" {

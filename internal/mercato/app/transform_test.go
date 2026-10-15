@@ -30,14 +30,16 @@ type fakeTransformer struct {
 
 func (f *fakeTransformer) ToolName() string { return f.name }
 
-func (f *fakeTransformer) SupportsEntry(t domain.EntryType) bool {
+func (f *fakeTransformer) Detect() []string { return []string{f.dotDir} }
+
+func (f *fakeTransformer) supports(t domain.EntryType) bool {
 	if t == domain.EntryTypeAgent {
 		return f.supportsAgents
 	}
 	return f.supportsSkills
 }
 
-func (f *fakeTransformer) OutputPath(entry domain.Entry) string {
+func (f *fakeTransformer) outputPath(entry domain.Entry) string {
 	name := strings.TrimSuffix(entry.Filename, ".md")
 	if entry.Type == domain.EntryTypeSkill {
 		return f.dotDir + "/rules/" + name + f.extension
@@ -45,18 +47,17 @@ func (f *fakeTransformer) OutputPath(entry domain.Entry) string {
 	return f.dotDir + "/agents/" + name + f.extension
 }
 
-func (f *fakeTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	if !f.SupportsEntry(entry.Type) {
+func (f *fakeTransformer) Transform(in domain.TransformInput) domain.TransformResult {
+	if !f.supports(in.Entry.Type) {
 		return domain.TransformResult{
 			ToolName:   f.name,
 			Skipped:    true,
-			SkipReason: f.name + " does not support " + string(entry.Type) + "s",
+			SkipReason: f.name + " does not support " + string(in.Entry.Type) + "s",
 		}
 	}
 	return domain.TransformResult{
-		ToolName:   f.name,
-		Content:    append([]byte("/* "+f.name+" */ "), content...),
-		OutputPath: f.OutputPath(entry),
+		ToolName: f.name,
+		Files:    []domain.OutputFile{{Path: f.outputPath(in.Entry), Content: append([]byte("/* "+f.name+" */ "), in.Content...)}},
 	}
 }
 
@@ -250,7 +251,7 @@ func TestRemove_MultiTool_DeletesToolFiles(t *testing.T) {
 								Profile:   "skills/bar",
 								Version:   "abc123",
 								Files:     domain.InstalledFiles{Skills: []string{"bar"}},
-								Locations: []domain.InstalledLocation{{Path: testProjectPath(), Type: domain.RuntimeTypeClaudeCode}},
+								Locations: []domain.InstalledLocation{{Path: testProjectPath(), Type: domain.RuntimeTypeClaudeCode}, {Path: testProjectPath(), Type: "cursor", Files: []domain.InstalledFile{{Path: ".cursor/rules/bar.mdc", XXH: "x", Source: "skills/bar/SKILL.md"}}}},
 							},
 						},
 					},

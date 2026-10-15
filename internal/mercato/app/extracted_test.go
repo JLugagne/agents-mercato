@@ -16,102 +16,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// findAffectedPackages
-// ---------------------------------------------------------------------------
-
-func TestFindAffectedPackages_MatchesByFile(t *testing.T) {
-	im := &domain.InstalledMarket{
-		Market: "mkt",
-		Packages: []domain.InstalledPackage{
-			{Profile: "dev/go", Files: domain.InstalledFiles{Agents: []string{"foo.md"}}},
-			{Profile: "dev/py", Files: domain.InstalledFiles{Skills: []string{"bar"}}},
-		},
-	}
-	diffs := []domain.FileDiff{
-		{Action: domain.DiffModify, From: "dev/go/agents/foo.md", To: "dev/go/agents/foo.md"},
-	}
-	mc := domain.MarketConfig{Name: "mkt", Branch: "main"}
-
-	a := newTestApp(&configstoretest.MockConfigStore{}, &gitrepotest.MockGitRepo{}, &filesystemtest.MockFilesystem{}, &statestoretest.MockStateStore{})
-	affected := a.findAffectedPackages(im, diffs, mc)
-
-	if len(affected) != 1 {
-		t.Fatalf("expected 1 affected package, got %d", len(affected))
-	}
-	if affected[0].Profile != "dev/go" {
-		t.Errorf("expected profile dev/go, got %q", affected[0].Profile)
-	}
-}
-
-func TestFindAffectedPackages_SkipsDeleted(t *testing.T) {
-	im := &domain.InstalledMarket{
-		Market: "mkt",
-		Packages: []domain.InstalledPackage{
-			{Profile: "dev/go", Files: domain.InstalledFiles{Agents: []string{"foo.md"}}},
-		},
-	}
-	diffs := []domain.FileDiff{
-		{Action: domain.DiffDelete, From: "dev/go/agents/foo.md", To: ""},
-	}
-	mc := domain.MarketConfig{Name: "mkt", Branch: "main"}
-
-	a := newTestApp(&configstoretest.MockConfigStore{}, &gitrepotest.MockGitRepo{}, &filesystemtest.MockFilesystem{}, &statestoretest.MockStateStore{})
-	affected := a.findAffectedPackages(im, diffs, mc)
-
-	if len(affected) != 0 {
-		t.Errorf("expected 0 affected (deletes skipped), got %d", len(affected))
-	}
-}
-
-func TestFindAffectedPackages_SkillsOnlyFiltering(t *testing.T) {
-	im := &domain.InstalledMarket{
-		Market: "mkt",
-		Packages: []domain.InstalledPackage{
-			{Profile: "agents/foo.md", Files: domain.InstalledFiles{Agents: []string{"foo.md"}}},
-			{Profile: "skills/bar", Files: domain.InstalledFiles{Skills: []string{"bar"}}},
-		},
-	}
-	diffs := []domain.FileDiff{
-		{Action: domain.DiffModify, From: "agents/foo.md", To: "agents/foo.md"},
-		{Action: domain.DiffModify, From: "skills/bar/SKILL.md", To: "skills/bar/SKILL.md"},
-	}
-	mc := domain.MarketConfig{Name: "mkt", Branch: "main", SkillsOnly: true, SkillsPath: "skills"}
-
-	a := newTestApp(&configstoretest.MockConfigStore{}, &gitrepotest.MockGitRepo{}, &filesystemtest.MockFilesystem{}, &statestoretest.MockStateStore{})
-	affected := a.findAffectedPackages(im, diffs, mc)
-
-	// Only the skill package should match — agent path is filtered out by SkillsOnly.
-	if len(affected) != 1 {
-		t.Fatalf("expected 1 affected (skills only), got %d", len(affected))
-	}
-	for _, pkg := range affected {
-		if pkg.Profile != "skills/bar" {
-			t.Errorf("expected skills/bar, got %q", pkg.Profile)
-		}
-	}
-}
-
-func TestFindAffectedPackages_NoMatch(t *testing.T) {
-	im := &domain.InstalledMarket{
-		Market: "mkt",
-		Packages: []domain.InstalledPackage{
-			{Profile: "dev/go", Files: domain.InstalledFiles{Agents: []string{"foo.md"}}},
-		},
-	}
-	diffs := []domain.FileDiff{
-		{Action: domain.DiffModify, From: "dev/py/agents/bar.md", To: "dev/py/agents/bar.md"},
-	}
-	mc := domain.MarketConfig{Name: "mkt", Branch: "main"}
-
-	a := newTestApp(&configstoretest.MockConfigStore{}, &gitrepotest.MockGitRepo{}, &filesystemtest.MockFilesystem{}, &statestoretest.MockStateStore{})
-	affected := a.findAffectedPackages(im, diffs, mc)
-
-	if len(affected) != 0 {
-		t.Errorf("expected 0 affected, got %d", len(affected))
-	}
-}
-
-// ---------------------------------------------------------------------------
 // mergeAddResult
 // ---------------------------------------------------------------------------
 
@@ -511,7 +415,10 @@ func TestCopyUpdatedFiles_Skills(t *testing.T) {
 		cfg:       domain.Config{LocalPath: ".claude"},
 	}
 
-	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	files, _, err := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(files.Skills) != 1 || files.Skills[0] != "bar" {
 		t.Errorf("expected skill bar, got %v", files.Skills)
 	}
@@ -543,7 +450,10 @@ func TestCopyUpdatedFiles_Agents(t *testing.T) {
 		cfg:       domain.Config{LocalPath: ".claude"},
 	}
 
-	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	files, _, err := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(files.Agents) != 1 || files.Agents[0] != "foo.md" {
 		t.Errorf("expected agent foo.md, got %v", files.Agents)
 	}
@@ -685,7 +595,10 @@ func TestCopyUpdatedFiles_SkillsWithLocation(t *testing.T) {
 		cfg:       domain.Config{LocalPath: ".claude"},
 	}
 
-	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	files, _, err := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(files.Skills) != 1 || files.Skills[0] != "bar" {
 		t.Errorf("expected skill bar, got %v", files.Skills)
 	}
@@ -722,7 +635,10 @@ func TestCopyUpdatedFiles_AgentsWithLocation(t *testing.T) {
 		cfg:       domain.Config{LocalPath: ".claude"},
 	}
 
-	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	files, _, err := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(files.Agents) != 1 || files.Agents[0] != "foo.md" {
 		t.Errorf("expected agent foo.md, got %v", files.Agents)
 	}
@@ -756,7 +672,10 @@ func TestCopyUpdatedFiles_CommandsWithLocation(t *testing.T) {
 		cfg:       domain.Config{LocalPath: ".claude"},
 	}
 
-	files, _ := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	files, _, err := a.copyUpdatedFiles(directWriter{fs: fsMock}, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(files.Commands) != 1 || files.Commands[0] != "refactor.md" {
 		t.Errorf("expected command refactor.md, got %v", files.Commands)
 	}

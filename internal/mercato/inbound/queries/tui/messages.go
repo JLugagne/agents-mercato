@@ -14,9 +14,16 @@ type MarketLoadedMsg struct {
 }
 
 type IndexReadyMsg struct {
-	Results  []service.SearchResult
-	Statuses []domain.EntryStatus
-	Elapsed  time.Duration
+	Results    []service.SearchResult
+	Statuses   []domain.EntryStatus
+	Markets    []domain.Market
+	MarketsErr error
+	Elapsed    time.Duration
+}
+
+type MarketsListedMsg struct {
+	Markets []domain.Market
+	Err     error
 }
 
 type StartupDoneMsg struct{}
@@ -53,7 +60,12 @@ type SearchResultMsg struct {
 	Results []service.SearchResult
 }
 
-type SearchTickMsg struct{}
+// SearchTickMsg fires once the search debounce delay has elapsed; only the
+// tick whose Seq matches the latest keystroke triggers a search.
+type SearchTickMsg struct {
+	Seq   int64
+	Query string
+}
 
 type MarketAddedMsg struct {
 	Name string

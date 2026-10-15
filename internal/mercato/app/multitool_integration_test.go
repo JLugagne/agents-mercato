@@ -233,10 +233,14 @@ func TestMultiTool_RemoveFromMultipleTools(t *testing.T) {
 						Market: "mkt",
 						Packages: []domain.InstalledPackage{
 							{
-								Profile:   "skills/bar",
-								Version:   "abc123",
-								Files:     domain.InstalledFiles{Skills: []string{"bar"}},
-								Locations: []domain.InstalledLocation{{Path: testProjectPath(), Type: domain.RuntimeTypeClaudeCode}},
+								Profile: "skills/bar",
+								Version: "abc123",
+								Files:   domain.InstalledFiles{Skills: []string{"bar"}},
+								Locations: []domain.InstalledLocation{
+									{Path: testProjectPath(), Type: domain.RuntimeTypeClaudeCode},
+									{Path: testProjectPath(), Type: "cursor", Files: []domain.InstalledFile{{Path: ".cursor/rules/bar.mdc", XXH: "x"}}},
+									{Path: testProjectPath(), Type: "windsurf", Files: []domain.InstalledFile{{Path: ".windsurf/rules/bar.md", XXH: "x"}}},
+								},
 							},
 						},
 					},
@@ -570,11 +574,11 @@ func TestMultiTool_MissingToolDirectory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Gemini plain markdown: no frontmatter in output
+// 8. Gemini skills go to the shared .agents/skills directory
 // ---------------------------------------------------------------------------
 
-func TestMultiTool_GeminiPlainMarkdown(t *testing.T) {
-	var geminiContent []byte
+func TestMultiTool_GeminiSkillWrittenToSharedAgentsDir(t *testing.T) {
+	written := map[string][]byte{}
 
 	cfg := &configstoretest.MockConfigStore{
 		LoadFn: func(path string) (domain.Config, error) {
@@ -587,9 +591,7 @@ func TestMultiTool_GeminiPlainMarkdown(t *testing.T) {
 	}
 	fsMock := &filesystemtest.MockFilesystem{
 		WriteFileFn: func(path string, content []byte) error {
-			if strings.Contains(path, ".gemini") {
-				geminiContent = content
-			}
+			written[path] = content
 			return nil
 		},
 		StatFn: func(name string) (fs.FileInfo, error) {
@@ -608,9 +610,8 @@ func TestMultiTool_GeminiPlainMarkdown(t *testing.T) {
 		},
 	}
 
-	// Use REAL GeminiTransformer to verify no frontmatter
 	transformers := domain.TransformerRegistry{
-		"gemini": &transform.GeminiTransformer{},
+		"gemini": transform.GeminiTransformer{},
 	}
 
 	a := newMultiToolApp(cfg, git, fsMock, &statestoretest.MockStateStore{}, transformers)
@@ -620,19 +621,12 @@ func TestMultiTool_GeminiPlainMarkdown(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if geminiContent == nil {
-		t.Fatal("expected gemini file to be written")
+	content, ok := written[testProjectPath()+"/.agents/skills/bar/SKILL.md"]
+	if !ok {
+		t.Fatalf("expected shared skill write, got %v", written)
 	}
-
-	// Gemini output should NOT have frontmatter delimiters
-	content := string(geminiContent)
-	if strings.Contains(content, "---") {
-		t.Errorf("gemini output should not contain frontmatter delimiters, got:\n%s", content)
-	}
-
-	// Should contain the body
-	if !strings.Contains(content, "Skill") || !strings.Contains(content, "Do stuff.") {
-		t.Errorf("gemini output missing expected body content, got:\n%s", content)
+	if !strings.Contains(string(content), "name: bar") || !strings.Contains(string(content), "Do stuff.") {
+		t.Errorf("unexpected shared skill content:\n%s", content)
 	}
 }
 

@@ -1,36 +1,21 @@
 package transform
 
-import (
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
-)
+import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
 
-// ContinueTransformer converts skills to Continue .continue/rules/*.md files.
+// ContinueTransformer is a legacy target kept for existing installs: Continue
+// is no longer maintained. Only skills are converted, into .continue/rules.
 type ContinueTransformer struct{}
 
-func (t *ContinueTransformer) ToolName() string { return "continue" }
+func (ContinueTransformer) ToolName() string { return "continue" }
 
-func (t *ContinueTransformer) SupportsEntry(entryType domain.EntryType) bool {
-	return entryType == domain.EntryTypeSkill
-}
+func (ContinueTransformer) Detect() []string { return []string{".continue"} }
 
-func (t *ContinueTransformer) OutputPath(entry domain.Entry) string {
-	return ".continue/rules/" + entryName(entry) + ".md"
-}
-
-func (t *ContinueTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	if entry.Type == domain.EntryTypeAgent {
-		return domain.TransformResult{
-			ToolName:   t.ToolName(),
-			Skipped:    true,
-			SkipReason: "continue does not support individual agents",
-		}
+func (ContinueTransformer) Transform(in domain.TransformInput) domain.TransformResult {
+	if in.Entry.Type != domain.EntryTypeSkill {
+		return unsupported("continue", in.Entry.Type)
 	}
-
-	body := extractBody(content)
-
-	return domain.TransformResult{
-		ToolName:   t.ToolName(),
-		Content:    body,
-		OutputPath: t.OutputPath(entry),
-	}
+	name := skillName(entryStem(in.Entry))
+	d := parseDoc(in.Content)
+	out := renderMarkdown([]field{{"name", name}, {"description", d.str("description")}, {"alwaysApply", false}}, d.body)
+	return files("continue", []domain.OutputFile{{Path: ".continue/rules/" + name + ".md", Content: out}})
 }

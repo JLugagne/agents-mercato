@@ -1,6 +1,6 @@
 # mct — A package manager for AI coding agents, skills, commands, and hooks
 
-Think **npm**, but for the agents, skills, slash commands, and Claude Code hooks consumed by Claude Code, Cursor, Windsurf, Codex, Gemini, OpenCode, Copilot, and more.
+Think **npm**, but for the agents, skills, slash commands, and Claude Code hooks consumed by Claude Code, Codex, Cursor, Copilot, Gemini, OpenCode, pi, Kilo, Factory, Qwen, Kiro, Windsurf, and more.
 
 Install, share, version, and sync agent, skill, command, and hook definitions across your team, your machines, your CI — and across **multiple AI tools at once** — from any Git repository.
 
@@ -33,7 +33,7 @@ That's what `mct` does.
 
 - **Markets** are Git repos you register as sources
 - **Entries** (agents, skills, slash commands, Claude Code hooks) are installed from markets
-- **Transformers** convert each entry into the correct format and location for every enabled tool (Claude, Cursor, Windsurf, Codex, Gemini, OpenCode, Copilot, Supermaven, PearAI, RooCode, Continue)
+- **Transformers** convert each entry into the correct format and location for every enabled tool (Claude plus 22 other tools, see [Supported tools](#supported-tools))
 - **Dependencies** between skills are resolved automatically
 - **Drift detection** knows when you've modified an installed file locally
 - **Sync** pulls upstream updates and flags conflicts
@@ -57,12 +57,12 @@ Refs use the `market@path` form: the part before `@` is the market name you regi
 By default, the entry is installed for Claude Code (`.claude/`). Enable other tools to install it everywhere at once:
 
 ```bash
-mct config set tools.cursor true
-mct config set tools.windsurf true
-mct add team@profile/skills/code-style
-# Writes .claude/skills/code-style/SKILL.md
-#        .cursor/rules/code-style.mdc
-#        .windsurf/rules/code-style.md
+mct config set tools.codex true
+mct config set tools.opencode true
+mct add team@profile/agents/reviewer
+# Writes .claude/agents/reviewer.md
+#        .codex/agents/reviewer.toml
+#        .opencode/agents/reviewer.md
 ```
 
 Save your setup so the rest of the team (and your CI) can reproduce it:
@@ -97,7 +97,7 @@ Your agents and skills are consistent everywhere — every laptop, every tool, e
 
 Real features, all implemented today:
 
-- **Multi-tool installation** — write entries to Claude, Cursor, Windsurf, Codex, Gemini, OpenCode, Copilot, Supermaven, PearAI, RooCode, Continue from a single source
+- **Multi-tool installation** — write agents, skills, commands and hooks to 23 AI coding tools from a single source
 - **Transformers** — entries are converted to each tool's native format (frontmatter, file extension, directory layout) at install time
 - **Tool mappings** — translate models (`opus`, `sonnet`, `haiku`) and built-in tool names (`Bash`, `Read`, `Edit`…) to each target tool's equivalent. Editable in `~/.config/mct/toolmappings.yml` for power users
 - **Atomic install / update / remove** — every write goes through a per-package staging directory and is promoted in one commit. A crash mid-install never leaves a half-written tree, and a startup recovery pass replays leftover stages from previous crashed runs
@@ -143,23 +143,40 @@ mct dist-upgrade
 
 ## Supported tools
 
-| Tool       | Agents | Skills | Commands | Hooks | Output location                        |
-| ---------- | :----: | :----: | :------: | :---: | -------------------------------------- |
-| Claude     |   ✓    |   ✓    |    ✓     |   ✓   | `.claude/agents/*.md`, `.claude/skills/<name>/SKILL.md`, `.claude/commands/*.md`, merged into `.claude/settings.json` |
-| Cursor     |        |   ✓    |          |       | `.cursor/rules/<name>.mdc`             |
-| Windsurf   |        |   ✓    |          |       | `.windsurf/rules/<name>.md`            |
-| Codex      |        |   ✓    |          |       | `.codex/skills/<name>/SKILL.md`        |
-| Gemini     |        |   ✓    |          |       | `.gemini/rules/<name>.md`              |
-| OpenCode   |   ✓    |   ✓    |          |       | `.opencode/agents/<name>.md`, `.opencode/rules/<name>.md` |
-| Copilot    |        |   ✓    |          |       | `.github/copilot-instructions.md`      |
-| Continue   |        |   ✓    |          |       | `.continue/rules/<name>.md`            |
-| Supermaven |        |   ✓    |          |       | `.supermavenrules`                     |
-| PearAI     |        |   ✓    |          |       | `.peairules`                           |
-| RooCode    |        |   ✓    |          |       | `.roocode.rules`                       |
+Entries are authored once in Claude Code format and converted for every enabled tool that is detected in the project (its marker directory, e.g. `.codex/`, exists). "shared" means `.agents/skills/<name>/`, the cross-tool skills directory, written once for all tools that read it. "native" means the tool already reads the Claude Code files, so nothing extra is written.
 
-Only `claude` is enabled by default. Enable others with `mct config set tools.<name> true`.
+| Tool | Skills | Agents | Commands | Hooks |
+| ---- | ------ | ------ | -------- | ----- |
+| `claude` | `.claude/skills/` | `.claude/agents/` | `.claude/commands/` | `.claude/settings.json` |
+| `codex` | shared | `.codex/agents/*.toml` | — | `.codex/hooks.json` |
+| `cursor` | native | native | skill in `.cursor/skills/` | `.cursor/hooks.json` |
+| `copilot` | native | native | skill in `.github/skills/` | `.github/hooks/mct-*.json` |
+| `gemini` | shared | `.gemini/agents/` | `.gemini/commands/*.toml` | `.gemini/settings.json` |
+| `opencode` | native | `.opencode/agents/` | `.opencode/commands/` | plugin `.opencode/plugins/mct-*.ts` |
+| `pi` | shared | — | `.pi/prompts/` | extension `.pi/extensions/mct-*.ts` |
+| `kilo` | `.kilo/skills/` | `.kilo/agents/` | `.kilo/commands/` | plugin `.kilo/plugin/mct-*.ts` |
+| `factory` | shared | `.factory/droids/` | `.factory/commands/` | `.factory/hooks.json` |
+| `qwen` | `.qwen/skills/` | `.qwen/agents/` | `.qwen/commands/` | `.qwen/settings.json` |
+| `kiro` | `.kiro/skills/` | `.kiro/agents/` | skill in `.kiro/skills/` | `.kiro/hooks/mct-*.json` |
+| `windsurf` (Devin Desktop) | shared | — | `.devin/` or `.windsurf/workflows/` | `.devin/` or `.windsurf/hooks.json` |
+| `junie` | shared | `.junie/agents/` | `.junie/commands/` | — |
+| `vibe` (Mistral) | shared | `.vibe/agents/*.toml` | skill in `.vibe/skills/` | — |
+| `antigravity` | shared | — | skill in `.agents/skills/` | `.agents/hooks.json` |
+| `cline` | native | — | `.clinerules/workflows/` | — |
+| `augment` | native | `.augment/agents/` | native | — |
+| `deepcode` (DeepSeek) | `.deepcode/skills/` | — | skill in `.deepcode/skills/` | — |
+| `codewhale` (ex DeepSeek-TUI) | native | `.codewhale/agents/*.toml` | — | — |
+| `zed` | shared | — | — | — |
+| `trae` | `.trae/skills/` | — | — | — |
+| `roocode`, `continue` (legacy) | one rule file per skill | — | — | — |
 
-**Commands and hooks are Claude-Code-specific.** Other tools silently skip them. Hooks are JSON snippets merged into `.claude/settings.json` under the `hooks` key (rather than copied as files); each entry receives a deterministic `mct_id` so removal targets only mct-installed hooks and leaves user-authored entries untouched.
+Amp, Crush and Goose read `.claude/skills/` natively and need no target.
+
+Only `claude` is enabled by default. Enable others with `mct config set tools.<name> true` (unknown names are rejected). Model and tool names in agents are mapped per tool; override them in `~/.config/mct/tool-mappings.yml`.
+
+Hooks are merged into each tool's settings or hooks file without touching user-authored entries: mct records the exact entry it added so it can update or remove it later. For OpenCode, Kilo and pi, each hook becomes a small TypeScript plugin that runs the hook command and blocks the tool call when it exits with code 2.
+
+Files written by older mct versions (previous tool formats, removed tools, legacy hook entries) are converted automatically by `mct update` / `mct sync`, or explicitly with `mct migrate [--dry-run] [--all-locations]`. Locally modified files are never overwritten.
 
 ## Core commands
 
@@ -195,7 +212,7 @@ mct search "vet" --type hook
 
 # Configuration
 mct config get                    # show current config
-mct config set tools.cursor true  # enable a tool target
+mct config set tools.codex true   # enable a tool target
 mct config set drift_policy prompt
 
 # Portable setup
@@ -222,7 +239,7 @@ See `mct --help` for the full command list, including `lint`, `conflicts`, `inde
 
 Git gives you versioned files. It doesn't give you:
 
-- **Multi-tool fan-out** — write the same source entry to Claude, Cursor, Windsurf, and Codex with one command, each in the right format and location
+- **Multi-tool fan-out** — write the same source entry to Claude, Codex, Cursor, OpenCode, pi and more with one command, each in the right format and location
 - **Dependency resolution** — when installing a skill, its required skills come along automatically
 - **Drift detection** — Git can't tell you that you edited `code-reviewer.md` locally after installing it from a market, and that the upstream has also changed
 - **Multi-repo composition** — using agents from three different repos in one project, with consistent updates

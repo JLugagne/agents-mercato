@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/app"
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/transform"
 	"github.com/JLugagne/agents-mercato/internal/mercato/inbound/commands"
@@ -47,34 +46,19 @@ func NewApp(configPath, cacheDir string) *cobra.Command {
 
 	installDB := cfgadapter.NewInstallDB()
 
-	registry := domain.TransformerRegistry{
-		"claude":     &transform.ClaudeTransformer{},
-		"cursor":     &transform.CursorTransformer{},
-		"windsurf":   &transform.WindsurfTransformer{},
-		"codex":      &transform.CodexTransformer{},
-		"gemini":     &transform.GeminiTransformer{},
-		"opencode":   &transform.OpenCodeTransformer{},
-		"copilot":    &transform.CopilotTransformer{},
-		"supermaven": &transform.SupermavenTransformer{},
-		"pearai":     &transform.PearAITransformer{},
-		"roocode":    &transform.RooCodeTransformer{},
-		"continue":   &transform.ContinueTransformer{},
-	}
+	registry := transform.Registry()
 	toolMappingsStore := cfgadapter.NewToolMappingStore()
 
-	// Disk-backed transactional filesystem manager. Recovery is best-effort:
-	// any leftover staging directories from a previous crashed run are
-	// reconciled before any new writes happen.
 	txm := txadapter.New(filepath.Join(cacheDir, "staging"))
-	if err := txm.RecoverPending(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "mct: tx recovery:", err)
-	}
 
 	application := app.New(gitRepo, fs, cfgStore, stateStore, installDB, configPath, cacheDir,
 		app.WithTransformers(registry),
 		app.WithToolMappings(toolMappingsStore),
 		app.WithTxManager(txm),
 	)
+	if err := application.RecoverPendingTx(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "mct: tx recovery:", err)
+	}
 
 	svc := commands.Services{
 		Markets: application,

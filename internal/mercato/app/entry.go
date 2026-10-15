@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/JLugagne/agents-mercato/assets"
@@ -12,27 +14,42 @@ import (
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
 )
 
+func isExistingDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func (a *App) loadInstallDBWithoutStale() (domain.InstallDatabase, error) {
+	db, err := a.idb.Load(a.cacheDir)
+	if err != nil {
+		return db, err
+	}
+	if len(db.CleanStaleLocations(isExistingDir)) == 0 {
+		return db, nil
+	}
+	if err := a.idb.Lock(a.cacheDir); err != nil {
+		return db, nil
+	}
+	defer func() { _ = a.idb.Unlock(a.cacheDir) }()
+	fresh, err := a.idb.Load(a.cacheDir)
+	if err != nil {
+		return db, nil
+	}
+	if len(fresh.CleanStaleLocations(isExistingDir)) > 0 {
+		_ = a.idb.Save(a.cacheDir, fresh)
+	}
+	return fresh, nil
+}
+
 func (a *App) List(opts service.ListOpts) ([]domain.Entry, error) {
 	cfg, err := a.cfg.Load(a.configPath)
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := a.idb.Load(a.cacheDir)
+	db, err := a.loadInstallDBWithoutStale()
 	if err != nil {
 		return nil, err
-	}
-
-	// Clean stale locations
-	stale := db.CleanStaleLocations(func(path string) bool {
-		info, err := os.Stat(path)
-		return err == nil && info.IsDir()
-	})
-	if len(stale) > 0 {
-		if lockErr := a.idb.Lock(a.cacheDir); lockErr == nil {
-			_ = a.idb.Save(a.cacheDir, db)
-			_ = a.idb.Unlock(a.cacheDir)
-		}
 	}
 
 	projectPath := projectPath(cfg.LocalPath)
@@ -57,13 +74,13 @@ func (a *App) List(opts service.ListOpts) ([]domain.Entry, error) {
 			}
 
 			for _, skill := range pkg.Files.Skills {
-				repoPath := a.skillFileRepoPath(pkg.Profile, skill, "SKILL.md")
+				repoPath := a.skillEntryRepoPath(pkg, skill)
 				ref := domain.MctRef(im.Market + "@" + repoPath)
 				entry := domain.Entry{
 					Ref:       ref,
 					Market:    im.Market,
 					RelPath:   repoPath,
-					Filename:  "SKILL.md",
+					Filename:  path.Base(repoPath),
 					Type:      domain.EntryTypeSkill,
 					Version:   domain.MctVersion(pkg.Version),
 					Profile:   pkg.Profile,
@@ -245,6 +262,11 @@ func (a *App) Add(ref domain.MctRef, opts service.AddOpts) (service.AddResult, e
 	if err != nil {
 		return service.AddResult{}, err
 	}
+	for tool := range opts.Tools {
+		if err := a.checkToolName(tool); err != nil {
+			return service.AddResult{}, err
+		}
+	}
 
 	cfg, err := a.cfg.Load(a.configPath)
 	if err != nil {
@@ -392,7 +414,11 @@ func (a *App) addInternal(
 	if len(opts.Tools) > 0 {
 		toolsOverride = opts.Tools
 	}
-	twr := a.writeToToolTargets(w, entryForTransform, content, projectPath, toolsOverride)
+	var assets []domain.TransformAsset
+	if entryType == domain.EntryTypeSkill {
+		assets = a.skillAssets(clonePath, mc.Branch, relPath)
+	}
+	twr := a.writeToToolTargets(w, entryForTransform, content, assets, projectPath, toolsOverride)
 
 	if result != nil {
 		mergeAddResult(result, twr)
@@ -420,19 +446,7 @@ func (a *App) addInternal(
 		Files: mergedClaudeFiles,
 	})
 
-	for toolName, toolFiles := range twr.ToolFiles {
-		mergedToolFiles := toolFiles
-		if pkg := db.FindPackage(marketName, profile); pkg != nil {
-			if loc := findLocationByPathAndType(pkg, projectPath, toolName); loc != nil {
-				mergedToolFiles = domain.MergeLocationFiles(loc.Files, toolFiles)
-			}
-		}
-		db.AddOrUpdatePackage(marketName, profile, headSHA, mergedPkgFiles, domain.InstalledLocation{
-			Path:  projectPath,
-			Type:  toolName,
-			Files: mergedToolFiles,
-		})
-	}
+	recordToolFiles(db, marketName, profile, headSHA, mergedPkgFiles, projectPath, twr)
 
 	// Stage the install database write so it lands in the same atomic
 	// commit as the file changes.
@@ -514,13 +528,18 @@ func (a *App) installEntryFiles(w txWriter, clonePath, branch, relPath, localPat
 		}
 		files.Skills = append(files.Skills, filepath.Base(skillDirPath))
 	} else if entryType == domain.EntryTypeSkill {
-		if err := w.WriteFile(localPath, content); err != nil {
+		skillMd, err := prepareFlatSkillDir(w, localPath)
+		if err != nil {
+			return files, written, err
+		}
+		if err := w.WriteFile(skillMd, content); err != nil {
 			return files, written, err
 		}
 		stem := strings.TrimSuffix(filepath.Base(relPath), ".md")
 		files.Skills = append(files.Skills, stem)
+		files.FlatSkills = append(files.FlatSkills, stem)
 		written = append(written, domain.InstalledFile{
-			Path: projectRel(localPath),
+			Path: projectRel(skillMd),
 			XXH:  xxhashHex(content),
 		})
 	} else if entryType == domain.EntryTypeCommand {
@@ -794,22 +813,28 @@ func fileInPackage(relPath string, files domain.InstalledFiles) bool {
 				return true
 			}
 		}
+	case domain.EntryTypeHook:
+		return slices.Contains(files.Hooks, filepath.Base(relPath))
 	case domain.EntryTypeSkill:
-		var name string
-		if isDirBasedSkill(relPath) {
-			// e.g. "dev/go/skills/bar/SKILL.md" → skill name "bar"
-			name = filepath.Base(filepath.Dir(relPath))
-		} else {
-			// e.g. "dev/go/skills/bar.md" → skill name "bar"
-			name = strings.TrimSuffix(filepath.Base(relPath), ".md")
-		}
-		for _, s := range files.Skills {
-			if s == name {
-				return true
-			}
-		}
+		return slices.Contains(files.Skills, skillNameFromPath(relPath))
 	}
 	return false
+}
+
+// skillNameFromPath returns the skill a repo path belongs to:
+// "dev/go/skills/bar/references/x.md" → "bar", "skills/bar.md" → "bar".
+func skillNameFromPath(relPath string) string {
+	parts := strings.Split(relPath, "/")
+	for i, p := range parts {
+		if p != "skills" || i+1 >= len(parts) {
+			continue
+		}
+		if i+2 < len(parts) {
+			return parts[i+1]
+		}
+		return strings.TrimSuffix(parts[i+1], ".md")
+	}
+	return ""
 }
 
 // isSkillEntryPoint returns true when relPath is a skill's main entry file:
@@ -827,6 +852,15 @@ func isSkillEntryPoint(relPath string) bool {
 // isDirBasedSkill returns true when relPath is a directory-based skill file
 // (e.g. "skills/foo/SKILL.md" or "dev/go/skills/bar/SKILL.md") rather than a
 // flat skill .md file (e.g. "skills/bar.md").
+func prepareFlatSkillDir(w txWriter, skillDir string) (string, error) {
+	if info, err := os.Lstat(skillDir); err == nil && !info.IsDir() {
+		if err := w.DeleteFile(skillDir); err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(skillDir, "SKILL.md"), nil
+}
+
 func isDirBasedSkill(relPath string) bool {
 	parts := strings.Split(relPath, "/")
 	for i, p := range parts {
@@ -921,14 +955,6 @@ func (a *App) Remove(ref domain.MctRef, opts service.RemoveOpts) (service.Remove
 	projectPath := projectPath(cfg.LocalPath)
 
 	entryType := inferEntryType(relPath)
-	entryForRemove := domain.Entry{
-		Ref:      ref,
-		Market:   marketName,
-		RelPath:  relPath,
-		Filename: filepath.Base(relPath),
-		Type:     entryType,
-		Profile:  profile,
-	}
 
 	w, commit, rollback, err := a.beginWriter("remove:" + string(ref))
 	if err != nil {
@@ -955,6 +981,11 @@ func (a *App) Remove(ref domain.MctRef, opts service.RemoveOpts) (service.Remove
 		if err := a.removeHookSnippet(w, ref, settingsAbsPath); err != nil {
 			return service.RemoveResult{}, err
 		}
+		tools, err := removeToolFiles(w, pkg, projectPath, relPath)
+		if err != nil {
+			return service.RemoveResult{}, err
+		}
+		removeResult.ToolsRemoved = append(removeResult.ToolsRemoved, tools...)
 		// Update installdb: drop hookFile from pkg.Files.Hooks and from
 		// the location's Files list.
 		if err := a.dropHookFromPackage(&db, marketName, profile, projectPath, hookFile); err != nil {
@@ -983,8 +1014,11 @@ func (a *App) Remove(ref domain.MctRef, opts service.RemoveOpts) (service.Remove
 			if err := a.deleteInstalledFiles(w, localPath, pkg.Files); err != nil {
 				return service.RemoveResult{}, err
 			}
-			tr := a.removeFromToolTargets(w, entryForRemove, loc.Path)
-			removeResult.ToolsRemoved = append(removeResult.ToolsRemoved, tr.Removed...)
+			tools, err := removeToolFiles(w, pkg, loc.Path, "")
+			if err != nil {
+				return service.RemoveResult{}, err
+			}
+			removeResult.ToolsRemoved = append(removeResult.ToolsRemoved, tools...)
 		}
 		for _, p := range paths {
 			db.RemoveLocation(marketName, profile, p)
@@ -998,8 +1032,11 @@ func (a *App) Remove(ref domain.MctRef, opts service.RemoveOpts) (service.Remove
 			return service.RemoveResult{}, err
 		}
 
-		tr := a.removeFromToolTargets(w, entryForRemove, projectPath)
-		removeResult.ToolsRemoved = append(removeResult.ToolsRemoved, tr.Removed...)
+		tools, err := removeToolFiles(w, pkg, projectPath, "")
+		if err != nil {
+			return service.RemoveResult{}, err
+		}
+		removeResult.ToolsRemoved = append(removeResult.ToolsRemoved, tools...)
 
 		db.RemoveLocation(marketName, profile, projectPath)
 	}
@@ -1080,25 +1117,8 @@ func (a *App) Prune(opts service.PruneOpts) ([]service.PruneResult, error) {
 				continue
 			}
 
-			// Check if any of the files still exist in the cached clone
-			allGone := true
-			for _, skill := range pkg.Files.Skills {
-				// Try to find the skill file in the clone
-				_, err := a.git.FileVersion(clonePath, skill)
-				if err == nil {
-					allGone = false
-					break
-				}
-			}
-			if allGone {
-				for _, agent := range pkg.Files.Agents {
-					_, err := a.git.FileVersion(clonePath, agent)
-					if err == nil {
-						allGone = false
-						break
-					}
-				}
-			}
+			total := len(pkg.Files.Skills) + len(pkg.Files.Agents) + len(pkg.Files.Commands) + len(pkg.Files.Hooks)
+			allGone := total > 0 && len(a.removedUpstreamEntries(clonePath, mc.Branch, pkg)) == total
 
 			if !allGone {
 				continue

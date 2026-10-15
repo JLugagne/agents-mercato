@@ -112,30 +112,8 @@ func (a *App) scanUpstreamRemoved(market string, pkg domain.InstalledPackage, cl
 		})
 	}
 
-	for _, skill := range pkg.Files.Skills {
-		dir := a.skillDirRepoPath(pkg.Profile, skill)
-		files, err := a.git.ListDirFiles(clonePath, branch, dir)
-		if err != nil || len(files) == 0 {
-			add("skill", skill)
-		}
-	}
-	for _, agent := range pkg.Files.Agents {
-		path := a.agentFileRepoPath(pkg.Profile, agent)
-		if _, err := a.git.FileVersion(clonePath, path); err != nil {
-			add("agent", agent)
-		}
-	}
-	for _, cmd := range pkg.Files.Commands {
-		path := a.commandFileRepoPath(pkg.Profile, cmd)
-		if _, err := a.git.FileVersion(clonePath, path); err != nil {
-			add("command", cmd)
-		}
-	}
-	for _, hook := range pkg.Files.Hooks {
-		path := a.hookFileRepoPath(pkg.Profile, hook)
-		if _, err := a.git.FileVersion(clonePath, path); err != nil {
-			add("hook", hook)
-		}
+	for _, e := range a.removedUpstreamEntries(clonePath, branch, pkg) {
+		add(e.kind, e.name)
 	}
 
 	// Stamp the location only when there's at least one finding — the

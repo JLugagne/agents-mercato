@@ -80,6 +80,7 @@ func NewRootCmd(svc Services) *cobra.Command {
 		newLintCmd(svc, opts),
 		newHookCmd(svc, opts),
 		newDoctorCmd(svc, opts),
+		newMigrateCmd(svc, opts),
 		newUpgradeCmd(opts),
 	)
 

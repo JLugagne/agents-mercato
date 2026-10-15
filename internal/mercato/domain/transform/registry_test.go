@@ -1,39 +1,26 @@
-package transform
+package transform_test
 
 import (
 	"testing"
 
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+	"github.com/stretchr/testify/require"
+
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/transform"
 )
 
-func TestTransformerRegistry_AllRegistered(t *testing.T) {
-	registry := domain.TransformerRegistry{
-		"claude":     &ClaudeTransformer{},
-		"cursor":     &CursorTransformer{},
-		"windsurf":   &WindsurfTransformer{},
-		"codex":      &CodexTransformer{},
-		"gemini":     &GeminiTransformer{},
-		"opencode":   &OpenCodeTransformer{},
-		"copilot":    &CopilotTransformer{},
-		"supermaven": &SupermavenTransformer{},
-		"pearai":     &PearAITransformer{},
-		"roocode":    &RooCodeTransformer{},
-		"continue":   &ContinueTransformer{},
-	}
+func TestRegistry_ListsEverySupportedTool(t *testing.T) {
+	require.Equal(t, []string{
+		"antigravity", "augment", "claude", "cline", "codewhale", "codex", "continue", "copilot", "cursor",
+		"deepcode", "factory", "gemini", "junie", "kilo", "kiro", "opencode", "pi", "qwen", "roocode",
+		"trae", "vibe", "windsurf", "zed",
+	}, transform.Registry().Names())
+}
 
-	expected := []string{"claude", "cursor", "windsurf", "codex", "gemini", "opencode", "copilot", "supermaven", "pearai", "roocode", "continue"}
-	for _, name := range expected {
-		tr, ok := registry.Get(name)
-		if !ok {
-			t.Errorf("transformer %q not found in registry", name)
+func TestRegistry_EveryNonClaudeToolDetectsSomething(t *testing.T) {
+	for name, tr := range transform.Registry() {
+		if name == "claude" {
 			continue
 		}
-		if tr.ToolName() != name {
-			t.Errorf("transformer %q: ToolName() = %q, want %q", name, tr.ToolName(), name)
-		}
-	}
-
-	if len(registry) != 11 {
-		t.Errorf("expected 11 transformers in registry, got %d", len(registry))
+		require.NotEmpty(t, tr.Detect(), name)
 	}
 }

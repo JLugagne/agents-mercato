@@ -201,3 +201,53 @@ func TestClosedTxRejectsFurtherCalls(t *testing.T) {
 		t.Error("Commit after Commit should fail")
 	}
 }
+
+func TestRecoverPending_ResumesFromProgress(t *testing.T) {
+	stagingRoot := t.TempDir()
+	dest := t.TempDir()
+	skillDir := filepath.Join(dest, "skills", "foo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promoted := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(promoted, []byte("promoted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(dest, "installed.json")
+
+	txDir := filepath.Join(stagingRoot, "crashed-tx")
+	if err := os.MkdirAll(filepath.Join(txDir, "files"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(txDir, "files", "2"), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	man := manifest{Ops: []op{
+		{Kind: opDeleteAll, Final: skillDir},
+		{Kind: opWrite, Final: promoted, Slot: "1"},
+		{Kind: opWrite, Final: pending, Slot: "2"},
+	}}
+	if err := writeManifest(txDir, man); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeProgress(txDir, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(txDir, "state"), []byte("committing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := New(stagingRoot).RecoverPending(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := os.ReadFile(promoted); err != nil || string(got) != "promoted" {
+		t.Errorf("already-applied write was undone: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(pending); err != nil || string(got) != "db" {
+		t.Errorf("pending write not replayed: %q, %v", got, err)
+	}
+	if _, err := os.Stat(txDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("staging dir should be cleaned up after recovery")
+	}
+}

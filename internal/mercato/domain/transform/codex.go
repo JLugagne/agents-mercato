@@ -1,48 +1,59 @@
 package transform
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 )
 
-// CodexTransformer converts skills to Codex format with directory-based output.
+// CodexTransformer targets OpenAI Codex CLI. Hooks are merged into
+// .codex/hooks.json with their Claude event names and matchers unchanged.
 type CodexTransformer struct{}
 
-func (t *CodexTransformer) ToolName() string { return "codex" }
+func (CodexTransformer) ToolName() string { return "codex" }
 
-func (t *CodexTransformer) SupportsEntry(entryType domain.EntryType) bool {
-	return entryType == domain.EntryTypeSkill
+func (CodexTransformer) Detect() []string { return []string{".codex"} }
+
+func (CodexTransformer) Transform(in domain.TransformInput) domain.TransformResult {
+	switch in.Entry.Type {
+	case domain.EntryTypeSkill:
+		return files("codex", sharedSkillFiles(in))
+	case domain.EntryTypeAgent:
+		return codexAgent(in)
+	case domain.EntryTypeCommand:
+		return skipped("codex", "codex custom prompts are user-level only and deprecated; use a skill")
+	case domain.EntryTypeHook:
+		return jsonHookTransform(jsonHookSpec{
+			tool:          "codex",
+			file:          ".codex/hooks.json",
+			keys:          []string{"hooks"},
+			events:        claudeDefinedEvents("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart", "SessionEnd", "PreCompact"),
+			matcher:       asIsMatcher,
+			timeoutFactor: 1,
+		}, in)
+	}
+	return unsupported("codex", in.Entry.Type)
 }
 
-func (t *CodexTransformer) OutputPath(entry domain.Entry) string {
-	return ".codex/skills/" + entryName(entry) + "/SKILL.md"
-}
-
-func (t *CodexTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	if entry.Type == domain.EntryTypeAgent {
-		return domain.TransformResult{
-			ToolName:   t.ToolName(),
-			Skipped:    true,
-			SkipReason: "codex does not support agents",
-			Warnings:   []string{"codex does not support agents, skipping " + entryName(entry)},
-		}
+func codexAgent(in domain.TransformInput) domain.TransformResult {
+	d := parseDoc(in.Content)
+	stem := entryStem(in.Entry)
+	name := agentSlug(d, stem)
+	desc := d.str("description")
+	if desc == "" {
+		desc = name
 	}
-
-	desc := parseDescription(content)
-	body := extractBody(content)
-	name := entryName(entry)
-
-	fm := buildFrontmatter([][2]string{
-		{"name", name},
-		{"description", desc},
-	})
-
-	var out []byte
-	out = append(out, fm...)
-	out = append(out, body...)
-
-	return domain.TransformResult{
-		ToolName:   t.ToolName(),
-		Content:    out,
-		OutputPath: t.OutputPath(entry),
+	var warnings []string
+	if m := d.str("model"); m != "" && m != "inherit" {
+		warnings = append(warnings, fmt.Sprintf("codex: model %q dropped (Codex uses OpenAI models)", m))
 	}
+	if len(d.list("tools")) > 0 {
+		warnings = append(warnings, "codex: tool restrictions are not converted")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "name = %s\n", tomlString(name))
+	fmt.Fprintf(&b, "description = %s\n", tomlString(desc))
+	fmt.Fprintf(&b, "developer_instructions = %s\n", tomlString(string(d.body)))
+	return files("codex", []domain.OutputFile{{Path: ".codex/agents/" + stem + ".toml", Content: []byte(b.String())}}, warnings...)
 }

@@ -3,12 +3,15 @@ package app
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
 )
 
@@ -55,6 +58,23 @@ func (a *App) detectDrift(pkg domain.InstalledPackage, location, clonePath, bran
 // All filesystem reads go through a.fs so the behaviour is identical between
 // the v2 (per-location hash) and legacy (git-comparison) paths and stays
 // fully fakeable in tests.
+func (a *App) flatSkillDrift(profile, skill, localBase, clonePath, branch, version string) (string, bool, error) {
+	original, err := a.git.ReadFileAtRef(clonePath, branch, a.flatSkillRepoPath(profile, skill), version)
+	if err != nil {
+		return "", false, nil
+	}
+	rel := "skills/" + skill + "/SKILL.md"
+	local, err := a.fs.ReadFile(filepath.Join(localBase, filepath.FromSlash(rel)))
+	if err != nil {
+		rel = "skills/" + skill
+		local, err = a.fs.ReadFile(filepath.Join(localBase, "skills", skill))
+	}
+	if err != nil {
+		return rel, true, err
+	}
+	return rel, xxhash.Sum64(local) != xxhash.Sum64(original), nil
+}
+
 func (a *App) detectDriftSplit(pkg domain.InstalledPackage, location, clonePath, branch string) (modified, deleted []string) {
 	classify := func(path string, err error, target *[]string) {
 		if os.IsNotExist(err) {
@@ -66,9 +86,12 @@ func (a *App) detectDriftSplit(pkg domain.InstalledPackage, location, clonePath,
 
 	// Prefer per-location file hashes (v2 schema). Fall back to git-comparison
 	// for legacy packages whose locations have no Files list yet.
-	loc := pkg.FindLocation(location)
-	if loc != nil && len(loc.Files) > 0 && loc.Type == domain.RuntimeTypeClaudeCode {
+	loc := findLocationByPathAndType(&pkg, location, domain.RuntimeTypeClaudeCode)
+	if loc != nil && len(loc.Files) > 0 {
 		for _, f := range loc.Files {
+			if isHookPseudoPath(f.Path) {
+				continue
+			}
 			abs := filepath.Join(location, f.Path)
 			data, err := a.fs.ReadFile(abs)
 			if err != nil {
@@ -83,13 +106,17 @@ func (a *App) detectDriftSplit(pkg domain.InstalledPackage, location, clonePath,
 	}
 
 	localBase := filepath.Join(location, ".claude")
+	version := pkg.VersionAt(location)
 
 	for _, skill := range pkg.Files.Skills {
 		// First check if we can read the original SKILL.md at the recorded version.
 		// If the original doesn't exist at that ref, skip drift check for this skill.
 		repoRelPath := a.skillFileRepoPath(pkg.Profile, skill, "SKILL.md")
-		_, origErr := a.git.ReadFileAtRef(clonePath, branch, repoRelPath, pkg.Version)
+		_, origErr := a.git.ReadFileAtRef(clonePath, branch, repoRelPath, version)
 		if origErr != nil {
+			if path, drifted, err := a.flatSkillDrift(pkg.Profile, skill, localBase, clonePath, branch, version); drifted {
+				classify(path, err, &modified)
+			}
 			continue
 		}
 
@@ -104,7 +131,7 @@ func (a *App) detectDriftSplit(pkg domain.InstalledPackage, location, clonePath,
 				continue
 			}
 			fileRepoPath := a.skillFileRepoPath(pkg.Profile, skill, entry.Name())
-			originalContent, err := a.git.ReadFileAtRef(clonePath, branch, fileRepoPath, pkg.Version)
+			originalContent, err := a.git.ReadFileAtRef(clonePath, branch, fileRepoPath, version)
 			if err != nil {
 				continue
 			}
@@ -123,7 +150,7 @@ func (a *App) detectDriftSplit(pkg domain.InstalledPackage, location, clonePath,
 	}
 	for _, agent := range pkg.Files.Agents {
 		repoRelPath := a.agentFileRepoPath(pkg.Profile, agent)
-		originalContent, err := a.git.ReadFileAtRef(clonePath, branch, repoRelPath, pkg.Version)
+		originalContent, err := a.git.ReadFileAtRef(clonePath, branch, repoRelPath, version)
 		if err != nil {
 			continue
 		}
@@ -170,6 +197,9 @@ func (a *App) skillFileRepoPath(profile, skill, filename string) string {
 // Profile "dev/go" + agent "foo.md" -> "dev/go/agents/foo.md"
 // Profile ""       + agent "foo.md" -> "agents/foo.md"
 func (a *App) agentFileRepoPath(profile, agent string) string {
+	if profile == "agents/"+agent || strings.HasSuffix(profile, "/agents/"+agent) {
+		return profile
+	}
 	if profile != "" {
 		return profile + "/agents/" + agent
 	}
@@ -181,6 +211,9 @@ func (a *App) agentFileRepoPath(profile, agent string) string {
 // Profile "dev/go" + command "foo.md" -> "dev/go/commands/foo.md"
 // Profile ""       + command "foo.md" -> "commands/foo.md"
 func (a *App) commandFileRepoPath(profile, command string) string {
+	if profile == "commands/"+command || strings.HasSuffix(profile, "/commands/"+command) {
+		return profile
+	}
 	if profile != "" {
 		return profile + "/commands/" + command
 	}
@@ -196,11 +229,138 @@ func (a *App) skillDirRepoPath(profile, skill string) string {
 	return strings.TrimSuffix(a.skillFileRepoPath(profile, skill, "SKILL.md"), "/SKILL.md")
 }
 
+func (a *App) skillEntryRepoPath(pkg domain.InstalledPackage, skill string) string {
+	if pkg.Files.IsFlatSkill(skill) || strings.HasSuffix(pkg.Profile, "/"+skill+".md") || pkg.Profile == skill+".md" {
+		return a.flatSkillRepoPath(pkg.Profile, skill)
+	}
+	return a.skillFileRepoPath(pkg.Profile, skill, "SKILL.md")
+}
+
+// flatSkillRepoPath returns the repo-relative path of a single-file skill
+// ("skills/<name>.md"), whose profile may be the file path itself.
+func (a *App) flatSkillRepoPath(profile, skill string) string {
+	if profile == skill+".md" || strings.HasSuffix(profile, "/"+skill+".md") {
+		return profile
+	}
+	if profile != "" {
+		return profile + "/skills/" + skill + ".md"
+	}
+	return "skills/" + skill + ".md"
+}
+
+func isHookPseudoPath(path string) bool {
+	return strings.Contains(path, "#hooks/")
+}
+
+// packageOwnsPath reports whether a repo-relative path belongs to one of the
+// entries installed from the package.
+func (a *App) packageOwnsPath(pkg domain.InstalledPackage, path string) bool {
+	for _, skill := range pkg.Files.Skills {
+		if strings.HasPrefix(path, a.skillDirRepoPath(pkg.Profile, skill)+"/") || path == a.flatSkillRepoPath(pkg.Profile, skill) {
+			return true
+		}
+	}
+	for _, agent := range pkg.Files.Agents {
+		if path == a.agentFileRepoPath(pkg.Profile, agent) {
+			return true
+		}
+	}
+	for _, cmd := range pkg.Files.Commands {
+		if path == a.commandFileRepoPath(pkg.Profile, cmd) {
+			return true
+		}
+	}
+	for _, hook := range pkg.Files.Hooks {
+		if path == a.hookFileRepoPath(pkg.Profile, hook) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUpstreamChange reports whether any file of pkg changed between version
+// and headSHA. Removed entries are left to pruneRemovedUpstreamFiles. A
+// version missing from the clone (re-clone, shallow history) counts as
+// changed so the package is refreshed from HEAD.
+func (a *App) hasUpstreamChange(clonePath string, mc domain.MarketConfig, pkg domain.InstalledPackage, version, headSHA string) bool {
+	if version == "" || version == headSHA {
+		return false
+	}
+	diffs, err := a.git.DiffSinceCommit(clonePath, mc.Branch, version)
+	if err != nil {
+		return true
+	}
+	for _, d := range diffs {
+		paths := []string{d.From, d.To}
+		if d.Action == domain.DiffDelete && skillRootForSubFile(d.From) == "" {
+			paths = nil
+		}
+		for _, path := range paths {
+			if path == "" || (mc.SkillsOnly && !isSkillPath(path, mc.SkillsPath)) {
+				continue
+			}
+			if a.packageOwnsPath(pkg, path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// upstreamFileExists reports whether path exists on the market branch. It
+// only returns false on a successful lookup, never on a git failure.
+func (a *App) upstreamFileExists(clonePath, branch, path string) (bool, error) {
+	dir := filepath.ToSlash(filepath.Dir(path))
+	if dir == "." {
+		dir = ""
+	}
+	files, err := a.git.ListDirFiles(clonePath, branch, dir)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(files, path), nil
+}
+
+type upstreamEntry struct{ kind, name string }
+
+// removedUpstreamEntries lists the package entries confirmed absent from the
+// market. A git failure never counts as a removal, so callers may delete
+// local files based on the result.
+func (a *App) removedUpstreamEntries(clonePath, branch string, pkg domain.InstalledPackage) []upstreamEntry {
+	gone := func(path string) bool {
+		_, err := a.git.FileVersion(clonePath, path)
+		return errors.Is(err, gitrepo.ErrFileNotFound)
+	}
+	var out []upstreamEntry
+	for _, skill := range pkg.Files.Skills {
+		files, err := a.git.ListDirFiles(clonePath, branch, a.skillDirRepoPath(pkg.Profile, skill))
+		if err == nil && len(files) == 0 && gone(a.flatSkillRepoPath(pkg.Profile, skill)) {
+			out = append(out, upstreamEntry{"skill", skill})
+		}
+	}
+	for _, agent := range pkg.Files.Agents {
+		if gone(a.agentFileRepoPath(pkg.Profile, agent)) {
+			out = append(out, upstreamEntry{"agent", agent})
+		}
+	}
+	for _, cmd := range pkg.Files.Commands {
+		if gone(a.commandFileRepoPath(pkg.Profile, cmd)) {
+			out = append(out, upstreamEntry{"command", cmd})
+		}
+	}
+	for _, hook := range pkg.Files.Hooks {
+		if gone(a.hookFileRepoPath(pkg.Profile, hook)) {
+			out = append(out, upstreamEntry{"hook", hook})
+		}
+	}
+	return out
+}
+
 // packageFileRefs returns all MctRefs for the files in an installed package.
 func (a *App) packageFileRefs(market string, pkg domain.InstalledPackage) []domain.MctRef {
 	refs := make([]domain.MctRef, 0, len(pkg.Files.Skills)+len(pkg.Files.Agents)+len(pkg.Files.Commands)+len(pkg.Files.Hooks))
 	for _, skill := range pkg.Files.Skills {
-		repoPath := a.skillFileRepoPath(pkg.Profile, skill, "SKILL.md")
+		repoPath := a.skillEntryRepoPath(pkg, skill)
 		refs = append(refs, domain.MctRef(market+"@"+repoPath))
 	}
 	for _, agent := range pkg.Files.Agents {
@@ -224,21 +384,9 @@ func (a *App) Check(opts service.CheckOpts) ([]domain.EntryStatus, error) {
 		return nil, err
 	}
 
-	db, err := a.idb.Load(a.cacheDir)
+	db, err := a.loadInstallDBWithoutStale()
 	if err != nil {
 		return nil, err
-	}
-
-	// Clean stale locations
-	stale := db.CleanStaleLocations(func(path string) bool {
-		info, err := os.Stat(path)
-		return err == nil && info.IsDir()
-	})
-	if len(stale) > 0 {
-		if lockErr := a.idb.Lock(a.cacheDir); lockErr == nil {
-			_ = a.idb.Save(a.cacheDir, db)
-			_ = a.idb.Unlock(a.cacheDir)
-		}
 	}
 
 	projectPath := projectPath(cfg.LocalPath)
@@ -256,6 +404,7 @@ func (a *App) Check(opts service.CheckOpts) ([]domain.EntryStatus, error) {
 		}
 
 		clonePath := a.clonePath(im.Market)
+		headSHA, headErr := a.git.RemoteHEAD(clonePath, mc.Branch)
 
 		for _, pkg := range im.Packages {
 			if pkg.FindLocation(projectPath) == nil {
@@ -266,17 +415,13 @@ func (a *App) Check(opts service.CheckOpts) ([]domain.EntryStatus, error) {
 			hasModified := len(modifiedFiles) > 0
 			hasDeletedOnly := !hasModified && len(deletedFiles) > 0
 
-			// Per-hook drift: a hook is "drifted" when its mct_id-tagged
-			// body in settings.json no longer matches the recorded
-			// checksum (or has been removed).
 			driftedHooks := a.detectHookDrift(im.Market, pkg, projectPath)
 			driftedHookSet := make(map[string]struct{}, len(driftedHooks))
 			for _, h := range driftedHooks {
 				driftedHookSet[h] = struct{}{}
 			}
 
-			headSHA, err := a.git.RemoteHEAD(clonePath, mc.Branch)
-			hasUpdate := err == nil && headSHA != pkg.Version
+			hasUpdate := headErr == nil && a.hasUpstreamChange(clonePath, *mc, pkg, pkg.VersionAt(projectPath), headSHA)
 
 			pkgState := domain.StateClean
 			switch {
@@ -414,8 +559,11 @@ func (a *App) Refresh(opts service.RefreshOpts) ([]service.RefreshResult, error)
 			im := db.FindMarket(mc.Name)
 			if im != nil {
 				for _, pkg := range im.Packages {
-					if pkg.Version != newSHA {
-						updatesAvailable++
+					for _, path := range pkg.LocationPaths() {
+						if a.hasUpstreamChange(clonePath, mc, pkg, pkg.VersionAt(path), newSHA) {
+							updatesAvailable++
+							break
+						}
 					}
 				}
 			}
@@ -469,6 +617,11 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 		return nil, err
 	}
 
+	migrated, err := a.Migrate(service.MigrateOpts{AllLocations: opts.AllLocations, DryRun: opts.DryRun})
+	if err != nil {
+		return nil, err
+	}
+
 	if err := a.idb.Lock(a.cacheDir); err != nil {
 		return nil, err
 	}
@@ -480,7 +633,7 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 	}
 
 	currentProject := projectPath(cfg.LocalPath)
-	var results []service.UpdateResult
+	results := migrationUpdateResults(migrated, opts.DryRun)
 
 	for _, mc := range cfg.Markets {
 		if opts.Market != "" && mc.Name != opts.Market {
@@ -503,55 +656,53 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 			refRelPath = rp
 		}
 
+		headSHA, err := a.git.RemoteHEAD(clonePath, mc.Branch)
+		if err != nil {
+			continue
+		}
+
 		for pi := range im.Packages {
 			pkg := &im.Packages[pi]
-
-			if pkg.Version == "" {
-				continue
-			}
 
 			if refRelPath != "" && !fileInPackage(refRelPath, pkg.Files) {
 				continue
 			}
 
-			diffs, err := a.git.DiffSinceCommit(clonePath, mc.Branch, pkg.Version)
-			var affected map[int]*domain.InstalledPackage
-			if err == nil {
-				affected = a.findAffectedPackages(im, diffs, mc)
-			}
-
-			_, hasUpstreamChange := affected[pi]
-			shouldProcess := hasUpstreamChange
-			var driftedLocations map[string]struct{}
-			if !shouldProcess && (opts.AllMerge || opts.AllKeep) {
-				driftedLocations = make(map[string]struct{})
-				for _, loc := range pkg.Locations {
-					mod, del := a.detectDriftSplit(*pkg, loc.Path, clonePath, mc.Branch)
-					if len(mod) > 0 || len(del) > 0 {
-						driftedLocations[loc.Path] = struct{}{}
-					}
-				}
-				if len(driftedLocations) > 0 {
-					shouldProcess = true
-				}
-			}
-
-			if !shouldProcess {
-				continue
-			}
-
 			seen := make(map[string]bool)
-			for _, location := range pkg.Locations {
-				if seen[location.Path] {
+			for _, location := range pkg.LocationPaths() {
+				if seen[location] {
 					continue
 				}
-				seen[location.Path] = true
+				seen[location] = true
 
-				if !hasUpstreamChange && driftedLocations != nil {
-					if _, ok := driftedLocations[location.Path]; !ok {
+				version := pkg.VersionAt(location)
+				if version == "" {
+					continue
+				}
+
+				if a.hasUpstreamChange(clonePath, mc, *pkg, version, headSHA) {
+					if !opts.AllLocations && location != currentProject {
 						continue
 					}
-				} else if !opts.AllLocations && location.Path != currentProject {
+				} else {
+					if !opts.AllMerge && !opts.AllKeep {
+						continue
+					}
+					mod, del := a.detectDriftSplit(*pkg, location, clonePath, mc.Branch)
+					if len(mod) == 0 && len(del) == 0 {
+						continue
+					}
+				}
+
+				if opts.DryRun {
+					results = append(results, service.UpdateResult{
+						Ref:        a.packagePrimaryRef(mc.Name, pkg),
+						Location:   location,
+						Action:     "would_update",
+						OldVersion: domain.MctVersion(version),
+						NewVersion: domain.MctVersion(headSHA),
+						DriftFiles: a.detectDrift(*pkg, location, clonePath, mc.Branch),
+					})
 					continue
 				}
 
@@ -560,7 +711,7 @@ func (a *App) Update(opts service.UpdateOpts) ([]service.UpdateResult, error) {
 					im:        im,
 					pkg:       pkg,
 					pkgIdx:    pi,
-					location:  location.Path,
+					location:  location,
 					clonePath: clonePath,
 					cfg:       cfg,
 					opts:      opts,
@@ -588,47 +739,6 @@ type updateCtx struct {
 	db        *domain.InstallDatabase
 }
 
-// findAffectedPackages identifies which installed packages in a market are
-// touched by the given diffs. Returns a map of package index -> package.
-func (a *App) findAffectedPackages(im *domain.InstalledMarket, diffs []domain.FileDiff, mc domain.MarketConfig) map[int]*domain.InstalledPackage {
-	affected := make(map[int]*domain.InstalledPackage)
-
-	for _, diff := range diffs {
-		filePath := diff.To
-		if filePath == "" {
-			filePath = diff.From
-		}
-
-		if mc.SkillsOnly && !isSkillPath(filePath, mc.SkillsPath) {
-			continue
-		}
-
-		if diff.Action == domain.DiffDelete {
-			continue
-		}
-
-		for pi := range im.Packages {
-			pkg := &im.Packages[pi]
-
-			profilePath := pkg.Profile
-			if profilePath != "" {
-				prefix := profilePath + "/"
-				if !strings.HasPrefix(filePath, prefix) && filePath != profilePath {
-					if !fileInPackage(filePath, pkg.Files) {
-						continue
-					}
-				}
-			}
-
-			if fileInPackage(filePath, pkg.Files) {
-				affected[pi] = pkg
-			}
-		}
-	}
-
-	return affected
-}
-
 // updatePackageAtLocation performs the actual update of a single package at a
 // single location: drift check, file replacement, and tool re-transform.
 // updatePackageAtLocation performs the actual update of a single package at a
@@ -636,7 +746,7 @@ func (a *App) findAffectedPackages(im *domain.InstalledMarket, diffs []domain.Fi
 // runs inside its own transaction so that on failure neither disk nor the
 // install database mutate.
 func (a *App) updatePackageAtLocation(ctx updateCtx) service.UpdateResult {
-	oldVersion := domain.MctVersion(ctx.pkg.Version)
+	oldVersion := domain.MctVersion(ctx.pkg.VersionAt(ctx.location))
 
 	driftFiles := a.detectDrift(*ctx.pkg, ctx.location, ctx.clonePath, ctx.mc.Branch)
 
@@ -684,7 +794,15 @@ func (a *App) updatePackageAtLocation(ctx updateCtx) service.UpdateResult {
 		oldClaudeFiles = append(oldClaudeFiles, loc.Files...)
 	}
 
-	newFiles, claudeFiles := a.copyUpdatedFiles(w, ctx)
+	newFiles, claudeFiles, err := a.copyUpdatedFiles(w, ctx)
+	if err != nil {
+		return service.UpdateResult{
+			Ref:      a.packagePrimaryRef(ctx.mc.Name, ctx.pkg),
+			Location: ctx.location,
+			Action:   "error",
+			Err:      err,
+		}
+	}
 
 	a.pruneRemovedFiles(w, ctx.location, oldClaudeFiles, claudeFiles)
 
@@ -700,7 +818,6 @@ func (a *App) updatePackageAtLocation(ctx updateCtx) service.UpdateResult {
 
 	// Replace package-level Files and the claude-code location's Files
 	// with the new authoritative set.
-	ctx.im.Packages[ctx.pkgIdx].Version = newSHA
 	ctx.im.Packages[ctx.pkgIdx].Files = newFiles
 
 	if loc := findLocationByPathAndType(&ctx.im.Packages[ctx.pkgIdx], ctx.location, domain.RuntimeTypeClaudeCode); loc != nil {
@@ -713,7 +830,8 @@ func (a *App) updatePackageAtLocation(ctx updateCtx) service.UpdateResult {
 		})
 	}
 
-	a.reTransformToolTargets(w, ctx.mc, ctx.im, ctx.pkgIdx, newFiles, ctx.location)
+	toolWarnings := a.reTransformToolTargets(w, ctx.mc, ctx.im, ctx.pkgIdx, newFiles, ctx.location, "HEAD", nil)
+	ctx.im.Packages[ctx.pkgIdx].SetVersionAt(ctx.location, newSHA)
 
 	if err := a.stageDBSave(w, *ctx.db); err != nil {
 		return service.UpdateResult{
@@ -740,14 +858,15 @@ func (a *App) updatePackageAtLocation(ctx updateCtx) service.UpdateResult {
 		OldVersion: oldVersion,
 		NewVersion: domain.MctVersion(newSHA),
 		DriftFiles: driftFiles,
+		Warnings:   toolWarnings,
 	}
 }
 
-// copyUpdatedFiles reads updated skill and agent files from the cached clone
-// and writes them to the local project directory.
 // copyUpdatedFiles reads updated skill, agent, command, and hook files from
-// the cached clone and writes them to the local project directory.
-func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles, []domain.InstalledFile) {
+// the cached clone and writes them to the local project directory. Entries
+// confirmed absent upstream are dropped; any other read failure aborts the
+// update so a transient git error never prunes installed files.
+func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles, []domain.InstalledFile, error) {
 	var newFiles domain.InstalledFiles
 	var written []domain.InstalledFile
 
@@ -758,178 +877,171 @@ func (a *App) copyUpdatedFiles(w txWriter, ctx updateCtx) (domain.InstalledFiles
 		}
 		return filepath.ToSlash(rel)
 	}
+	readUpstream := func(repoPath string) ([]byte, bool, error) {
+		content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, repoPath, "HEAD")
+		if err == nil {
+			return content, true, nil
+		}
+		exists, existsErr := a.upstreamFileExists(ctx.clonePath, ctx.mc.Branch, repoPath)
+		if existsErr != nil || exists {
+			return nil, false, errors.Join(errors.New("read "+repoPath), err, existsErr)
+		}
+		return nil, false, nil
+	}
+	writeFile := func(dest string, content []byte) error {
+		if err := w.WriteFile(dest, content); err != nil {
+			return err
+		}
+		written = append(written, domain.InstalledFile{Path: projectRel(dest), XXH: xxhashHex(content)})
+		return nil
+	}
 
 	for _, skill := range ctx.pkg.Files.Skills {
 		skillDirPath := a.skillDirRepoPath(ctx.pkg.Profile, skill)
 		dirFiles, err := a.git.ListDirFiles(ctx.clonePath, ctx.mc.Branch, skillDirPath)
-		if err != nil || len(dirFiles) == 0 {
+		if err != nil {
+			return newFiles, written, err
+		}
+		if len(dirFiles) == 0 {
+			content, found, err := readUpstream(a.flatSkillRepoPath(ctx.pkg.Profile, skill))
+			if err != nil {
+				return newFiles, written, err
+			}
+			if !found {
+				continue
+			}
+			skillMd, err := prepareFlatSkillDir(w, filepath.Join(ctx.location, ".claude", "skills", skill))
+			if err != nil {
+				return newFiles, written, err
+			}
+			if err := writeFile(skillMd, content); err != nil {
+				return newFiles, written, err
+			}
+			newFiles.Skills = append(newFiles.Skills, skill)
+			newFiles.FlatSkills = append(newFiles.FlatSkills, skill)
 			continue
 		}
 		localSkillDir := filepath.Join(ctx.location, ".claude", "skills", skill)
-		wroteAny := false
 		for _, f := range dirFiles {
 			content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, f, "HEAD")
 			if err != nil {
-				continue
+				return newFiles, written, err
 			}
 			rel, err := filepath.Rel(skillDirPath, f)
 			if err != nil {
-				continue
+				return newFiles, written, err
 			}
-			dest := filepath.Join(localSkillDir, rel)
-			if err := w.WriteFile(dest, content); err != nil {
-				continue
+			if err := writeFile(filepath.Join(localSkillDir, rel), content); err != nil {
+				return newFiles, written, err
 			}
-			written = append(written, domain.InstalledFile{
-				Path: projectRel(dest),
-				XXH:  xxhashHex(content),
-			})
-			wroteAny = true
 		}
-		if wroteAny {
-			newFiles.Skills = append(newFiles.Skills, skill)
-		}
+		newFiles.Skills = append(newFiles.Skills, skill)
 	}
 
 	for _, agent := range ctx.pkg.Files.Agents {
-		repoPath := a.agentFileRepoPath(ctx.pkg.Profile, agent)
-		content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, repoPath, "HEAD")
+		content, found, err := readUpstream(a.agentFileRepoPath(ctx.pkg.Profile, agent))
 		if err != nil {
+			return newFiles, written, err
+		}
+		if !found {
 			continue
 		}
-		localPath := filepath.Join(ctx.location, ".claude", "agents", agent)
-		if err := w.WriteFile(localPath, content); err != nil {
-			continue
+		if err := writeFile(filepath.Join(ctx.location, ".claude", "agents", agent), domain.StripRequiresSkills(content)); err != nil {
+			return newFiles, written, err
 		}
-		written = append(written, domain.InstalledFile{
-			Path: projectRel(localPath),
-			XXH:  xxhashHex(content),
-		})
 		newFiles.Agents = append(newFiles.Agents, agent)
 	}
 
 	for _, cmd := range ctx.pkg.Files.Commands {
-		repoPath := a.commandFileRepoPath(ctx.pkg.Profile, cmd)
-		content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, repoPath, "HEAD")
+		content, found, err := readUpstream(a.commandFileRepoPath(ctx.pkg.Profile, cmd))
 		if err != nil {
+			return newFiles, written, err
+		}
+		if !found {
 			continue
 		}
-		localPath := filepath.Join(ctx.location, ".claude", "commands", cmd)
-		if err := w.WriteFile(localPath, content); err != nil {
-			continue
+		if err := writeFile(filepath.Join(ctx.location, ".claude", "commands", cmd), content); err != nil {
+			return newFiles, written, err
 		}
-		written = append(written, domain.InstalledFile{
-			Path: projectRel(localPath),
-			XXH:  xxhashHex(content),
-		})
 		newFiles.Commands = append(newFiles.Commands, cmd)
 	}
 
-	// Hooks: upstream body changes require splice-then-merge under the
-	// same mct_id so existing entries with the old body get replaced.
 	for _, hookFile := range ctx.pkg.Files.Hooks {
 		repoPath := a.hookFileRepoPath(ctx.pkg.Profile, hookFile)
-		content, err := a.git.ReadFileAtRef(ctx.clonePath, ctx.mc.Branch, repoPath, "HEAD")
+		content, found, err := readUpstream(repoPath)
 		if err != nil {
+			return newFiles, written, err
+		}
+		if !found {
 			continue
 		}
 		snippet, err := domain.ParseHookSnippet(content)
 		if err != nil {
-			continue
+			return newFiles, written, err
 		}
 		ref := domain.MctRef(ctx.mc.Name + "@" + repoPath)
 		settingsAbsPath := filepath.Join(ctx.location, ".claude", "settings.json")
 		if err := a.removeHookSnippet(w, ref, settingsAbsPath); err != nil {
-			continue
+			return newFiles, written, err
 		}
 		hookWritten, err := a.installHookSnippet(w, ref, snippet, settingsAbsPath, hookFile)
 		if err != nil {
-			continue
+			return newFiles, written, err
 		}
 		written = append(written, hookWritten...)
 		newFiles.Hooks = append(newFiles.Hooks, hookFile)
 	}
 
-	return newFiles, written
+	return newFiles, written, nil
 }
 
-// reTransformToolTargets re-transforms all files in a package to enabled tool
-// targets and updates the tool checksums in the install database.
-// reTransformToolTargets re-transforms all files in a package to enabled tool
-// targets and updates the tool checksums in the install database.
-func (a *App) reTransformToolTargets(w txWriter, mc domain.MarketConfig, im *domain.InstalledMarket, pkgIdx int, files domain.InstalledFiles, location string) {
+func (a *App) reTransformToolTargets(w txWriter, mc domain.MarketConfig, im *domain.InstalledMarket, pkgIdx int, files domain.InstalledFiles, location, ref string, skip func(string) bool) []string {
 	pkg := &im.Packages[pkgIdx]
+	clonePath := a.clonePath(mc.Name)
+	scoped := domain.InstalledPackage{Profile: pkg.Profile, Files: files}
 
-	// Snapshot per-tool old file sets BEFORE re-writing so we can prune
-	// orphans (files dropped from the new version) per tool.
-	oldByTool := make(map[string][]domain.InstalledFile)
-	for _, loc := range pkg.Locations {
-		if loc.Path != location || loc.Type == domain.RuntimeTypeClaudeCode {
-			continue
-		}
-		oldByTool[loc.Type] = append([]domain.InstalledFile(nil), loc.Files...)
+	type source struct {
+		repoPath  string
+		entryType domain.EntryType
 	}
-
-	newByTool := make(map[string][]domain.InstalledFile)
-	accumulate := func(twr toolWriteResult) {
-		for toolName, toolFiles := range twr.ToolFiles {
-			newByTool[toolName] = append(newByTool[toolName], toolFiles...)
-		}
-	}
-
+	var sources []source
 	for _, skill := range files.Skills {
-		repoPath := a.skillFileRepoPath(pkg.Profile, skill, "SKILL.md")
-		content, err := a.git.ReadFileAtRef(a.clonePath(mc.Name), mc.Branch, repoPath, "HEAD")
-		if err != nil {
-			continue
-		}
-		entry := domain.Entry{
-			Ref:      domain.MctRef(mc.Name + "@" + repoPath),
-			Market:   mc.Name,
-			RelPath:  repoPath,
-			Filename: "SKILL.md",
-			Type:     domain.EntryTypeSkill,
-			Profile:  pkg.Profile,
-		}
-		accumulate(a.writeToToolTargets(w, entry, content, location, nil))
+		sources = append(sources, source{a.skillEntryRepoPath(scoped, skill), domain.EntryTypeSkill})
 	}
-
 	for _, agent := range files.Agents {
-		repoPath := a.agentFileRepoPath(pkg.Profile, agent)
-		content, err := a.git.ReadFileAtRef(a.clonePath(mc.Name), mc.Branch, repoPath, "HEAD")
+		sources = append(sources, source{a.agentFileRepoPath(pkg.Profile, agent), domain.EntryTypeAgent})
+	}
+	for _, cmd := range files.Commands {
+		sources = append(sources, source{a.commandFileRepoPath(pkg.Profile, cmd), domain.EntryTypeCommand})
+	}
+	for _, hook := range files.Hooks {
+		sources = append(sources, source{a.hookFileRepoPath(pkg.Profile, hook), domain.EntryTypeHook})
+	}
+
+	var all toolWriteResult
+	for _, src := range sources {
+		content, err := a.git.ReadFileAtRef(clonePath, mc.Branch, src.repoPath, ref)
 		if err != nil {
 			continue
 		}
+		if src.entryType == domain.EntryTypeAgent {
+			content = domain.StripRequiresSkills(content)
+		}
+		var assets []domain.TransformAsset
+		if src.entryType == domain.EntryTypeSkill {
+			assets = a.skillAssetsAt(clonePath, mc.Branch, src.repoPath, ref)
+		}
 		entry := domain.Entry{
-			Ref:      domain.MctRef(mc.Name + "@" + repoPath),
+			Ref:      domain.MctRef(mc.Name + "@" + src.repoPath),
 			Market:   mc.Name,
-			RelPath:  repoPath,
-			Filename: agent,
-			Type:     domain.EntryTypeAgent,
+			RelPath:  src.repoPath,
+			Filename: path.Base(src.repoPath),
+			Type:     src.entryType,
 			Profile:  pkg.Profile,
 		}
-		accumulate(a.writeToToolTargets(w, entry, content, location, nil))
+		all.merge(a.writeToolTargets(w, entry, content, assets, location, nil, skip))
 	}
-
-	// Prune per-tool: files in old\new are gone from the new version.
-	for toolName, oldFiles := range oldByTool {
-		a.pruneRemovedFiles(w, location, oldFiles, newByTool[toolName])
-	}
-
-	// Replace each tool location's Files with the new authoritative set.
-	// Drop locations whose tool produced no files this round.
-	for toolName, toolFiles := range newByTool {
-		loc := findLocationByPathAndType(pkg, location, toolName)
-		if loc == nil {
-			pkg.Locations = append(pkg.Locations, domain.InstalledLocation{
-				Path:  location,
-				Type:  toolName,
-				Files: toolFiles,
-			})
-		} else {
-			loc.Files = toolFiles
-		}
-	}
+	return append(all.Warnings, syncToolFiles(w, pkg, location, all.ToolFiles)...)
 }
 
 // mergeToolChecksums merges new checksums into a package's ToolChecksums map.
@@ -970,6 +1082,7 @@ func (a *App) Sync(opts service.SyncOpts) ([]service.SyncResult, error) {
 		CI:             opts.CI,
 		AcceptBreaking: opts.AcceptBreaking,
 		AllMerge:       opts.AllMerge,
+		AllKeep:        opts.AllKeep,
 		AllLocations:   opts.AllLocations,
 	})
 	if err != nil {
@@ -1131,36 +1244,32 @@ func (a *App) pruneStaleLocations() ([]string, error) {
 	return pruned, nil
 }
 
-// pruneRemovedUpstreamFiles inspects every package installed from the given
-// market and removes locally any skill/agent/command/hook whose source file
-// no longer exists at the market's HEAD after fetch. For each removed file
-// it deletes the on-disk content across all locations, drops it from
-// pkg.Files and from each location's recorded files. Hooks are spliced from
-// settings.json via removeHookSnippet using their mct_id.
-//
-// Returns the human-readable list of pruned items (one entry per
-// market@profile#kind/name removed). Any partial failure aborts and rolls
-// back the transaction.
-// pruneRemovedUpstreamFiles inspects every package installed from the given
-// market and removes locally any skill/agent/command/hook whose source file
-// no longer exists at the market's HEAD after fetch. For each removed file
-// it deletes the on-disk content across all locations, drops it from
-// pkg.Files and from each location's recorded files. Hooks are spliced from
-// settings.json via removeHookSnippet using their mct_id.
-//
-// Returns a human-readable list of pruned items (one entry per
-// market@profile#kind/name removed). Any partial failure aborts and rolls
-// back the transaction.
-// pruneRemovedUpstreamFiles inspects every package installed from the given
-// market and removes locally any skill/agent/command/hook whose source file
-// no longer exists at the market's HEAD after fetch. For each removed file
-// it deletes the on-disk content across all locations, drops it from
-// pkg.Files and from each location's recorded files. Hooks are spliced from
-// settings.json via removeHookSnippet using their mct_id.
-//
-// Returns a human-readable list of pruned items (one entry per
-// market@profile#kind/name removed). Any partial failure aborts and rolls
-// back the transaction.
+func (a *App) upstreamEntrySource(pkg domain.InstalledPackage, kind, name string) string {
+	switch kind {
+	case "skill":
+		return a.skillEntryRepoPath(pkg, name)
+	case "agent":
+		return a.agentFileRepoPath(pkg.Profile, name)
+	case "command":
+		return a.commandFileRepoPath(pkg.Profile, name)
+	case "hook":
+		return a.hookFileRepoPath(pkg.Profile, name)
+	}
+	return ""
+}
+
+func distinctLocationPaths(pkg domain.InstalledPackage) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, loc := range pkg.Locations {
+		if !seen[loc.Path] {
+			seen[loc.Path] = true
+			out = append(out, loc.Path)
+		}
+	}
+	return out
+}
+
 func (a *App) pruneRemovedUpstreamFiles(marketName, branch, clonePath string) ([]string, error) {
 	if err := a.idb.Lock(a.cacheDir); err != nil {
 		return nil, err
@@ -1186,30 +1295,8 @@ func (a *App) pruneRemovedUpstreamFiles(marketName, branch, clonePath string) ([
 	var removals []removal
 
 	for _, pkg := range im.Packages {
-		for _, skill := range pkg.Files.Skills {
-			dir := a.skillDirRepoPath(pkg.Profile, skill)
-			files, err := a.git.ListDirFiles(clonePath, branch, dir)
-			if err != nil || len(files) == 0 {
-				removals = append(removals, removal{profile: pkg.Profile, kind: "skill", name: skill})
-			}
-		}
-		for _, agent := range pkg.Files.Agents {
-			path := a.agentFileRepoPath(pkg.Profile, agent)
-			if _, err := a.git.FileVersion(clonePath, path); err != nil {
-				removals = append(removals, removal{profile: pkg.Profile, kind: "agent", name: agent})
-			}
-		}
-		for _, cmd := range pkg.Files.Commands {
-			path := a.commandFileRepoPath(pkg.Profile, cmd)
-			if _, err := a.git.FileVersion(clonePath, path); err != nil {
-				removals = append(removals, removal{profile: pkg.Profile, kind: "command", name: cmd})
-			}
-		}
-		for _, hook := range pkg.Files.Hooks {
-			path := a.hookFileRepoPath(pkg.Profile, hook)
-			if _, err := a.git.FileVersion(clonePath, path); err != nil {
-				removals = append(removals, removal{profile: pkg.Profile, kind: "hook", name: hook})
-			}
+		for _, e := range a.removedUpstreamEntries(clonePath, branch, pkg) {
+			removals = append(removals, removal{profile: pkg.Profile, kind: e.kind, name: e.name})
 		}
 	}
 
@@ -1265,6 +1352,15 @@ func (a *App) pruneRemovedUpstreamFiles(marketName, branch, clonePath string) ([
 			continue
 		}
 
+		if source := a.upstreamEntrySource(*pkg, r.kind, r.name); source != "" {
+			for _, locPath := range distinctLocationPaths(*pkg) {
+				if _, err := removeToolFiles(w, pkg, locPath, source); err != nil {
+					_ = rollback()
+					return nil, err
+				}
+			}
+		}
+
 		switch r.kind {
 		case "skill":
 			for li := range pkg.Locations {
@@ -1278,6 +1374,7 @@ func (a *App) pruneRemovedUpstreamFiles(marketName, branch, clonePath string) ([
 				loc.Files = dropFilesByPrefix(loc.Files, prefix)
 			}
 			pkg.Files.Skills = dropName(pkg.Files.Skills, r.name)
+			pkg.Files.FlatSkills = dropName(pkg.Files.FlatSkills, r.name)
 
 		case "agent":
 			for li := range pkg.Locations {
@@ -1382,8 +1479,6 @@ func (a *App) DetectDeleted(opts service.DetectDeletedOpts) ([]service.DeletedFi
 					continue
 				}
 				for _, f := range loc.Files {
-					// Skip hook entries — their "presence" is in settings.json
-					// under an mct_id, not a standalone file.
 					if strings.Contains(f.Path, "#hooks/") {
 						continue
 					}
@@ -1485,10 +1580,18 @@ func (a *App) RestoreDeleted(files []service.DeletedFile, opts service.RestoreOp
 				writtenResults = append(writtenResults, service.RestoreResult{File: f, Action: "failed", Err: errUnknownFileShape})
 				continue
 			}
-			content, readErr := a.git.ReadFileAtRef(clonePath, mc.Branch, repoPath, pkg.Version)
+			content, readErr := a.git.ReadFileAtRef(clonePath, mc.Branch, repoPath, pkg.VersionAt(f.Location))
+			if readErr != nil {
+				if flat := a.flatSkillRepoPathForInstalled(pkg.Profile, f.RelPath); flat != "" {
+					content, readErr = a.git.ReadFileAtRef(clonePath, mc.Branch, flat, pkg.VersionAt(f.Location))
+				}
+			}
 			if readErr != nil {
 				writtenResults = append(writtenResults, service.RestoreResult{File: f, Action: "failed", Err: readErr})
 				continue
+			}
+			if inferEntryType(repoPath) == domain.EntryTypeAgent {
+				content = domain.StripRequiresSkills(content)
 			}
 			abs := filepath.Join(f.Location, f.RelPath)
 			if writeErr := w.WriteFile(abs, content); writeErr != nil {
@@ -1545,12 +1648,27 @@ func (a *App) deletedFileRepoPath(profile, relPath string) string {
 		body := strings.TrimPrefix(rest, "skills/")
 		slash := strings.Index(body, "/")
 		if slash < 0 {
-			return ""
+			return a.flatSkillRepoPath(profile, body)
 		}
 		return a.skillFileRepoPath(profile, body[:slash], body[slash+1:])
 	default:
 		return ""
 	}
+}
+
+func (a *App) flatSkillRepoPathForInstalled(profile, relPath string) string {
+	body, ok := strings.CutPrefix(relPath, ".claude/skills/")
+	if !ok {
+		return ""
+	}
+	name, ok := strings.CutSuffix(body, "/SKILL.md")
+	if !ok {
+		name = body
+	}
+	if name == "" || strings.Contains(name, "/") {
+		return ""
+	}
+	return a.flatSkillRepoPath(profile, name)
 }
 
 // errMarketNotFound, errPackageNotFound and errUnknownFileShape are

@@ -1,200 +1,168 @@
-package transform
+package transform_test
 
 import (
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/transform"
 )
 
-func TestOpenCodeTransformer(t *testing.T) {
-	tr := &OpenCodeTransformer{}
+func TestOpenCode_Basics(t *testing.T) {
+	tr := transform.OpenCodeTransformer{}
+	require.Equal(t, "opencode", tr.ToolName())
+	require.Equal(t, []string{".opencode", "opencode.json", "opencode.jsonc"}, tr.Detect())
+}
 
-	t.Run("ToolName", func(t *testing.T) {
-		if got := tr.ToolName(); got != "opencode" {
-			t.Errorf("ToolName() = %q, want %q", got, "opencode")
-		}
-	})
+func TestOpenCode_SkillIsNative(t *testing.T) {
+	res := transform.OpenCodeTransformer{}.Transform(f1Input(domain.EntryTypeSkill, "dev/skills/go/SKILL.md", f1Skill))
+	require.Equal(t, domain.TransformResult{ToolName: "opencode"}, res)
+}
 
-	t.Run("SupportsEntry", func(t *testing.T) {
-		if !tr.SupportsEntry(domain.EntryTypeAgent) {
-			t.Error("should support agents")
-		}
-		if !tr.SupportsEntry(domain.EntryTypeSkill) {
-			t.Error("should support skills")
-		}
-	})
+func TestOpenCode_Agent(t *testing.T) {
+	res := transform.OpenCodeTransformer{}.Transform(f1Input(domain.EntryTypeAgent, "dev/agents/reviewer.md", f1Agent))
+	require.False(t, res.Skipped)
+	require.Len(t, res.Files, 1)
+	require.Equal(t, ".opencode/agents/reviewer.md", res.Files[0].Path)
+	fm, body := f1Split(t, res.Files[0].Content)
+	require.Equal(t, "You review.\n", body)
+	require.Equal(t, "Reviews: Go code", fm["description"])
+	require.Equal(t, "subagent", fm["mode"])
+	require.Equal(t, "anthropic/claude-opus-5-5", fm["model"])
+	require.NotContains(t, fm, "tools")
+	require.NotContains(t, fm, "name")
+	require.Equal(t, map[string]any{
+		"read": "allow", "edit": "allow", "bash": "allow", "glob": "deny", "grep": "allow",
+		"list": "deny", "webfetch": "deny", "websearch": "deny", "task": "deny", "todowrite": "deny",
+	}, fm["permission"])
+	require.Equal(t, []string{"opencode: no equivalent for tools mcp__gh__pr, dropped"}, res.Warnings)
+}
 
-	t.Run("OutputPath", func(t *testing.T) {
-		tests := []struct {
-			name  string
-			entry domain.Entry
-			want  string
-		}{
-			{
-				name:  "agent",
-				entry: domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				want:  ".opencode/agents/my-agent.md",
-			},
-			{
-				name:  "skill",
-				entry: domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill},
-				want:  ".opencode/rules/my-skill.md",
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				if got := tr.OutputPath(tt.entry); got != tt.want {
-					t.Errorf("OutputPath() = %q, want %q", got, tt.want)
-				}
-			})
-		}
-	})
+func TestOpenCode_AgentWithoutToolsOrModel(t *testing.T) {
+	in := f1Input(domain.EntryTypeAgent, "dev/agents/plain.md", "---\nmodel: inherit\n---\nBody\n")
+	in.Entry.Description = "From index"
+	res := transform.OpenCodeTransformer{}.Transform(in)
+	fm, _ := f1Split(t, res.Files[0].Content)
+	require.Equal(t, map[string]any{"description": "From index", "mode": "subagent"}, fm)
+	require.Empty(t, res.Warnings)
+}
 
-	t.Run("Transform", func(t *testing.T) {
-		mappings := domain.ToolMapping{
-			Models: map[string]map[string]string{
-				"claude-sonnet-4-20250514": {"opencode": "anthropic/claude-sonnet-4-20250514"},
-				"claude-haiku":             {"opencode": ""},
-			},
-			Tools: map[string]map[string]string{
-				"Read":  {"opencode": "read"},
-				"Edit":  {"opencode": "edit"},
-				"Bash":  {"opencode": "bash"},
-				"Write": {"opencode": "write"},
-				"Glob":  {"opencode": "glob"},
-				"Grep":  {"opencode": "grep"},
-			},
-		}
+func TestOpenCode_AgentModels(t *testing.T) {
+	cases := map[string]string{
+		"sonnet":                     "anthropic/claude-sonnet-5-5",
+		"haiku":                      "anthropic/claude-haiku-5-5",
+		"claude-sonnet-4-5-20250929": "anthropic/claude-sonnet-4-5-20250929",
+	}
+	for model, want := range cases {
+		res := transform.OpenCodeTransformer{}.Transform(f1Input(domain.EntryTypeAgent, "agents/a.md", "---\ndescription: d\nmodel: "+model+"\n---\nB\n"))
+		fm, _ := f1Split(t, res.Files[0].Content)
+		require.Equal(t, want, fm["model"], model)
+	}
 
-		tests := []struct {
-			name      string
-			entry     domain.Entry
-			content   string
-			mappings  domain.ToolMapping
-			checkBody func(t *testing.T, result domain.TransformResult)
-		}{
-			{
-				name:     "agent with mapped model and tools",
-				entry:    domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:  "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\ntools:\n  - Read\n  - Edit\n  - Bash\n---\nAgent body",
-				mappings: mappings,
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if !strings.Contains(content, "description: My agent") {
-						t.Error("missing description")
-					}
-					if !strings.Contains(content, "mode: primary") {
-						t.Error("missing mode: primary")
-					}
-					if !strings.Contains(content, "model: anthropic/claude-sonnet-4-20250514") {
-						t.Error("missing mapped model")
-					}
-					if !strings.Contains(content, "tools: read, edit, bash") {
-						t.Errorf("missing mapped tools, got: %s", content)
-					}
-					if !strings.Contains(content, "Agent body") {
-						t.Error("missing body")
-					}
-					if len(result.Warnings) != 0 {
-						t.Errorf("unexpected warnings: %v", result.Warnings)
-					}
-				},
-			},
-			{
-				name:     "agent with unmapped model generates warning",
-				entry:    domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:  "---\ndescription: My agent\nmodel: gpt-4o\n---\nAgent body",
-				mappings: mappings,
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if strings.Contains(content, "model:") {
-						t.Error("unmapped model should be stripped")
-					}
-					if len(result.Warnings) == 0 {
-						t.Error("expected warning for unmapped model")
-					}
-					if !strings.Contains(result.Warnings[0], "unmapped model") {
-						t.Errorf("warning = %q, want to contain 'unmapped model'", result.Warnings[0])
-					}
-				},
-			},
-			{
-				name:     "agent with model mapping to empty string strips silently",
-				entry:    domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:  "---\ndescription: My agent\nmodel: claude-haiku\n---\nAgent body",
-				mappings: mappings,
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if strings.Contains(content, "model:") {
-						t.Error("empty-mapped model should be stripped")
-					}
-					if len(result.Warnings) != 0 {
-						t.Errorf("should strip silently, got warnings: %v", result.Warnings)
-					}
-				},
-			},
-			{
-				name:     "agent with no model",
-				entry:    domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:  "---\ndescription: My agent\n---\nAgent body",
-				mappings: mappings,
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if strings.Contains(content, "model:") {
-						t.Error("should not have model field when none in source")
-					}
-				},
-			},
-			{
-				name:     "skill transform",
-				entry:    domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill},
-				content:  "---\ndescription: A great skill\nauthor: me\nmct_ref: foo@bar\n---\nSkill body here",
-				mappings: mappings,
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if !strings.Contains(content, "description: A great skill") {
-						t.Error("missing description")
-					}
-					if !strings.Contains(content, "Skill body here") {
-						t.Error("missing body")
-					}
-					if strings.Contains(content, "mct_ref") {
-						t.Error("should not contain mct fields")
-					}
-					if result.OutputPath != ".opencode/rules/my-skill.md" {
-						t.Errorf("OutputPath = %q", result.OutputPath)
-					}
-				},
-			},
-			{
-				name:     "agent with nil mappings",
-				entry:    domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:  "---\ndescription: My agent\nmodel: claude-sonnet-4-20250514\n---\nBody",
-				mappings: domain.ToolMapping{},
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					if len(result.Warnings) == 0 {
-						t.Error("expected warning for unmapped model with nil mappings")
-					}
-				},
-			},
+	res := transform.OpenCodeTransformer{}.Transform(f1Input(domain.EntryTypeAgent, "agents/a.md", "---\ndescription: d\nmodel: gpt-5\n---\nB\n"))
+	fm, _ := f1Split(t, res.Files[0].Content)
+	require.NotContains(t, fm, "model")
+	require.Len(t, res.Warnings, 1)
+
+	in := f1Input(domain.EntryTypeAgent, "agents/a.md", "---\ndescription: d\nmodel: opus\ntools: Bash\n---\nB\n")
+	in.Mappings = domain.ToolMapping{
+		Models: map[string]map[string]string{"opus": {"opencode": "openrouter/opus"}},
+		Tools:  map[string]map[string]string{"Bash": {"opencode": "skill"}},
+	}
+	res = transform.OpenCodeTransformer{}.Transform(in)
+	fm, _ = f1Split(t, res.Files[0].Content)
+	require.Equal(t, "openrouter/opus", fm["model"])
+	perm := fm["permission"].(map[string]any)
+	require.Equal(t, "deny", perm["bash"])
+	require.Equal(t, "allow", perm["skill"])
+}
+
+func TestOpenCode_Command(t *testing.T) {
+	res := transform.OpenCodeTransformer{}.Transform(f1Input(domain.EntryTypeCommand, "dev/commands/fix.md", f1Command))
+	require.Len(t, res.Files, 1)
+	require.Equal(t, ".opencode/commands/fix.md", res.Files[0].Path)
+	fm, body := f1Split(t, res.Files[0].Content)
+	require.Equal(t, map[string]any{"description": "Fix an issue", "model": "anthropic/claude-haiku-5-5"}, fm)
+	require.Equal(t, "Fix $ARGUMENTS then $1.\n", body)
+	require.Empty(t, res.Warnings)
+}
+
+func TestOpenCode_HookPreToolUse(t *testing.T) {
+	res := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"PreToolUse","matcher":"Edit|Write","hooks":[{"type":"command","command":"echo \"x\" </dev/null","timeout":30},{"type":"command","command":"true"}]}`))
+	require.False(t, res.Skipped)
+	require.Empty(t, res.Warnings)
+	require.Empty(t, res.Hooks)
+	require.Len(t, res.Files, 1)
+	require.Equal(t, ".opencode/plugins/mct-go-vet.ts", res.Files[0].Path)
+	ts := string(res.Files[0].Content)
+	require.Contains(t, ts, `import type { Plugin } from "@opencode-ai/plugin"`+"\n")
+	require.Contains(t, ts, `import { spawnSync } from "node:child_process"`)
+	require.Contains(t, ts, `{ command: "echo \"x\" </dev/null", timeout: 30000 },`)
+	require.Contains(t, ts, `{ command: "true" },`)
+	require.Contains(t, ts, `const matcher = new RegExp("^(?:Edit|Write)$")`)
+	require.Contains(t, ts, `"apply_patch": "Edit",`)
+	require.Contains(t, ts, `"list": "LS",`)
+	require.Contains(t, ts, `spawnSync("sh", ["-c", handler.command], {`)
+	require.Contains(t, ts, "export const MctGoVet: Plugin = async ({ directory }) => ({\n")
+	require.Contains(t, ts, `"tool.execute.before": async (input, output) => {`)
+	require.Contains(t, ts, `const toolName = claudeToolName(field(input, "tool"))`)
+	require.Contains(t, ts, "if (!matcher.test(toolName)) return")
+	require.Contains(t, ts, `hook_event_name: "PreToolUse",`)
+	require.Contains(t, ts, `tool_input: field(output, "args"),`)
+	require.Contains(t, ts, "if (blocked !== undefined) throw new Error(blocked)")
+	require.NotContains(t, ts, "export default")
+	require.True(t, ts[len(ts)-3:] == "})\n")
+
+	again := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"PreToolUse","matcher":"Edit|Write","hooks":[{"type":"command","command":"echo \"x\" </dev/null","timeout":30},{"type":"command","command":"true"}]}`))
+	require.Equal(t, res.Files[0].Content, again.Files[0].Content)
+}
+
+func TestOpenCode_HookEvents(t *testing.T) {
+	cases := []struct {
+		event, want, notWant string
+	}{
+		{"PostToolUse", `"tool.execute.after": async (input, output) => {`, "throw new Error"},
+		{"SessionStart", `if (field(event, "type") !== "session.created") return`, "claudeToolName"},
+		{"Stop", `if (field(event, "type") !== "session.idle") return`, "matcher"},
+		{"PreCompact", `"experimental.session.compacting": async (input) => {`, "toolNames"},
+		{"UserPromptSubmit", `prompt: promptText(field(output, "parts")),`, "throw new Error"},
+	}
+	for _, c := range cases {
+		res := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"` + c.event + `","hooks":[{"type":"command","command":"x"}]}`))
+		require.False(t, res.Skipped, c.event)
+		ts := string(res.Files[0].Content)
+		require.Contains(t, ts, c.want, c.event)
+		require.Contains(t, ts, `hook_event_name: "`+c.event+`",`, c.event)
+		require.NotContains(t, ts, c.notWant, c.event)
+		require.NotContains(t, ts, "new RegExp", c.event)
+		if c.event == "UserPromptSubmit" {
+			require.Len(t, res.Warnings, 1)
+		} else {
+			require.Empty(t, res.Warnings, c.event)
 		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				result := tr.Transform(tt.entry, []byte(tt.content), tt.mappings)
-				if result.Skipped {
-					t.Error("opencode should not skip any entry")
-				}
-				if tt.checkBody != nil {
-					tt.checkBody(t, result)
-				}
-			})
-		}
-	})
+	}
+}
+
+func TestOpenCode_HookMatcherHandling(t *testing.T) {
+	res := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"PostToolUse","matcher":"*","hooks":[{"type":"command","command":"x"}]}`))
+	ts := string(res.Files[0].Content)
+	require.NotContains(t, ts, "matcher")
+	require.Contains(t, ts, "const toolName = claudeToolName")
+
+	res = transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"SessionStart","matcher":"startup","hooks":[{"type":"command","command":"x"}]}`))
+	require.Equal(t, []string{`opencode: hook matcher "startup" ignored for event SessionStart`}, res.Warnings)
+}
+
+func TestOpenCode_HookUnsupported(t *testing.T) {
+	for _, ev := range []string{"SubagentStop", "SessionEnd", "Notification"} {
+		res := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"` + ev + `","hooks":[{"type":"command","command":"x"}]}`))
+		require.True(t, res.Skipped, ev)
+		require.Contains(t, res.SkipReason, ev)
+		require.Empty(t, res.Files)
+	}
+
+	res := transform.OpenCodeTransformer{}.Transform(f1Hook(`{"event":"Stop","hooks":[{"type":"prompt","prompt":"x"}]}`))
+	require.True(t, res.Skipped)
+	require.Contains(t, res.SkipReason, "invalid hook")
 }

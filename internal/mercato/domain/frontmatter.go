@@ -94,18 +94,33 @@ func ExtractFrontmatterBytes(content []byte) ([]byte, error) {
 	return []byte(raw), nil
 }
 
+// StripRequiresSkills removes the requires_skills block from the frontmatter,
+// including its list items, leaving every other key untouched. Content without
+// parseable frontmatter is returned unchanged.
 func StripRequiresSkills(content []byte) []byte {
 	fmBytes, err := ExtractFrontmatterBytes(content)
 	if err != nil {
 		return content
 	}
 
-	// Match requires_skills block and everything until the next top-level key or end of frontmatter
-	re := regexp.MustCompile(`(?ms)^requires_skills:.*?(?:\n\w|$)`)
-	newFM := re.ReplaceAll(fmBytes, []byte(""))
-	newFM = bytes.TrimSpace(newFM)
+	lines := bytes.Split(fmBytes, []byte("\n"))
+	kept := make([][]byte, 0, len(lines))
+	inBlock := false
+	for _, line := range lines {
+		if inBlock {
+			if len(bytes.TrimSpace(line)) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '-' {
+				continue
+			}
+			inBlock = false
+		}
+		if bytes.HasPrefix(line, []byte("requires_skills:")) {
+			inBlock = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	newFM := bytes.TrimSpace(bytes.Join(kept, []byte("\n")))
 
-	// Replace old frontmatter with new one in the original content
 	return bytes.Replace(content, fmBytes, newFM, 1)
 }
 

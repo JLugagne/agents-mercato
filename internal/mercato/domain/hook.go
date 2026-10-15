@@ -16,10 +16,10 @@ import (
 //	  ]
 //	}
 //
-// At install time the snippet's hooks[] entries are merged into the project's
-// .claude/settings.json under settings.json["hooks"][Event]. The Matcher field
-// is optional at the snippet level and is also propagated to each hook object
-// in the merged settings.json (per Claude Code's hook configuration schema).
+// At install time the snippet becomes one matcher group
+// {"matcher": Matcher, "hooks": Hooks} appended to the project's
+// .claude/settings.json under settings.json["hooks"][Event]. Ownership of the
+// group is tracked in .claude/mct-hooks.json, never inside settings.json.
 type HookSnippet struct {
 	Event   string
 	Matcher string

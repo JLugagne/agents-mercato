@@ -1,95 +1,68 @@
-package transform
+package transform_test
 
 import (
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/transform"
 )
 
-func TestCodexTransformer(t *testing.T) {
-	tr := &CodexTransformer{}
+func TestCodex(t *testing.T) {
+	tr := transform.CodexTransformer{}
+	require.Equal(t, "codex", tr.ToolName())
+	require.Equal(t, []string{".codex"}, tr.Detect())
 
-	t.Run("ToolName", func(t *testing.T) {
-		if got := tr.ToolName(); got != "codex" {
-			t.Errorf("ToolName() = %q, want %q", got, "codex")
-		}
+	t.Run("skill", func(t *testing.T) {
+		res := tr.Transform(f2Input(domain.EntryTypeSkill, "d/skills/go-x/SKILL.md", f2Skill))
+		require.Len(t, res.Files, 1)
+		require.Equal(t, ".agents/skills/go-x/SKILL.md", res.Files[0].Path)
 	})
 
-	t.Run("SupportsEntry", func(t *testing.T) {
-		if tr.SupportsEntry(domain.EntryTypeAgent) {
-			t.Error("should not support agents")
-		}
-		if !tr.SupportsEntry(domain.EntryTypeSkill) {
-			t.Error("should support skills")
-		}
+	t.Run("agent", func(t *testing.T) {
+		res := tr.Transform(f2Input(domain.EntryTypeAgent, "d/agents/reviewer.md", f2Agent))
+		require.Len(t, res.Files, 1)
+		require.Equal(t, ".codex/agents/reviewer.toml", res.Files[0].Path)
+		s := string(res.Files[0].Content)
+		require.Contains(t, s, `name = "code-reviewer"`)
+		require.Contains(t, s, `description = "Reviews code"`)
+		require.Contains(t, s, `developer_instructions = "You review.\n"`)
+		require.NotContains(t, s, "model")
+		require.Len(t, res.Warnings, 2)
 	})
 
-	t.Run("OutputPath", func(t *testing.T) {
-		entry := domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill}
-		want := ".codex/skills/my-skill/SKILL.md"
-		if got := tr.OutputPath(entry); got != want {
-			t.Errorf("OutputPath() = %q, want %q", got, want)
-		}
+	t.Run("agent inherit has no warning", func(t *testing.T) {
+		res := tr.Transform(f2Input(domain.EntryTypeAgent, "d/agents/a.md", "---\ndescription: d\nmodel: inherit\n---\nB"))
+		require.Empty(t, res.Warnings)
 	})
 
-	t.Run("Transform", func(t *testing.T) {
-		tests := []struct {
-			name       string
-			entry      domain.Entry
-			content    string
-			wantSkip   bool
-			wantReason string
-			checkBody  func(t *testing.T, result domain.TransformResult)
-		}{
-			{
-				name:       "agent is skipped with warning",
-				entry:      domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:    "---\ndescription: test\n---\nBody",
-				wantSkip:   true,
-				wantReason: "codex does not support agents",
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					if len(result.Warnings) == 0 {
-						t.Error("expected warning for skipped agent")
-					}
-				},
-			},
-			{
-				name:    "skill with all fields",
-				entry:   domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill},
-				content: "---\ndescription: A great skill\nauthor: me\n---\nSkill body here",
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if !strings.Contains(content, "name: my-skill") {
-						t.Error("missing name field")
-					}
-					if !strings.Contains(content, "description: A great skill") {
-						t.Error("missing description")
-					}
-					if !strings.Contains(content, "Skill body here") {
-						t.Error("missing body")
-					}
-					if result.OutputPath != ".codex/skills/my-skill/SKILL.md" {
-						t.Errorf("OutputPath = %q", result.OutputPath)
-					}
-				},
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				result := tr.Transform(tt.entry, []byte(tt.content), domain.ToolMapping{})
-				if result.Skipped != tt.wantSkip {
-					t.Errorf("Skipped = %v, want %v", result.Skipped, tt.wantSkip)
-				}
-				if tt.wantReason != "" && result.SkipReason != tt.wantReason {
-					t.Errorf("SkipReason = %q, want %q", result.SkipReason, tt.wantReason)
-				}
-				if tt.checkBody != nil {
-					tt.checkBody(t, result)
-				}
-			})
-		}
+	t.Run("command skipped", func(t *testing.T) {
+		res := tr.Transform(f2Input(domain.EntryTypeCommand, "d/commands/c.md", f2Command))
+		require.True(t, res.Skipped)
+		require.Contains(t, res.SkipReason, "deprecated")
+	})
+
+	t.Run("hook", func(t *testing.T) {
+		res := tr.Transform(f2Hook("PreToolUse", "Bash", "30"))
+		require.False(t, res.Skipped)
+		require.Len(t, res.Hooks, 1)
+		p := res.Hooks[0]
+		require.Equal(t, ".codex/hooks.json", p.File)
+		require.Equal(t, []string{"hooks"}, p.Keys)
+		require.Equal(t, "PreToolUse", p.Event)
+		require.JSONEq(t, `{"matcher":"Bash","hooks":[{"type":"command","command":"go vet ./...","timeout":30}]}`, string(p.Entry))
+	})
+
+	t.Run("hook without matcher or timeout", func(t *testing.T) {
+		res := tr.Transform(f2Hook("Stop", "", ""))
+		require.Equal(t, `{"hooks":[{"command":"go vet ./...","type":"command"}]}`, string(res.Hooks[0].Entry))
+	})
+
+	t.Run("notification skipped", func(t *testing.T) {
+		res := tr.Transform(f2Hook("Notification", "", ""))
+		require.True(t, res.Skipped)
+		require.NotEmpty(t, res.Warnings)
+		require.Empty(t, res.Hooks)
 	})
 }

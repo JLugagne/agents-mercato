@@ -1,46 +1,41 @@
 package transform
 
-import (
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
-)
+import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
 
-// CursorTransformer converts skills to Cursor .mdc rule files.
+// CursorTransformer targets Cursor. Skills and agents are read natively from
+// .claude/; commands become skills hidden from model invocation.
 type CursorTransformer struct{}
 
-func (t *CursorTransformer) ToolName() string { return "cursor" }
+func (CursorTransformer) ToolName() string { return "cursor" }
 
-func (t *CursorTransformer) SupportsEntry(entryType domain.EntryType) bool {
-	return entryType == domain.EntryTypeSkill
-}
+func (CursorTransformer) Detect() []string { return []string{".cursor", ".cursorrules"} }
 
-func (t *CursorTransformer) OutputPath(entry domain.Entry) string {
-	return ".cursor/rules/" + entryName(entry) + ".mdc"
-}
-
-func (t *CursorTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	if entry.Type == domain.EntryTypeAgent {
-		return domain.TransformResult{
-			ToolName:   t.ToolName(),
-			Skipped:    true,
-			SkipReason: "cursor does not support agents",
-		}
+func (CursorTransformer) Transform(in domain.TransformInput) domain.TransformResult {
+	switch in.Entry.Type {
+	case domain.EntryTypeSkill, domain.EntryTypeAgent:
+		return domain.TransformResult{ToolName: "cursor"}
+	case domain.EntryTypeCommand:
+		return files("cursor", commandSkillFiles(".cursor/skills", in, field{"disable-model-invocation", true}))
+	case domain.EntryTypeHook:
+		return jsonHookTransform(jsonHookSpec{
+			tool:   "cursor",
+			file:   ".cursor/hooks.json",
+			keys:   []string{"hooks"},
+			header: map[string]any{"version": 1},
+			events: map[string]string{
+				"PreToolUse":       "preToolUse",
+				"PostToolUse":      "postToolUse",
+				"UserPromptSubmit": "beforeSubmitPrompt",
+				"Stop":             "stop",
+				"SubagentStop":     "subagentStop",
+				"SessionStart":     "sessionStart",
+				"SessionEnd":       "sessionEnd",
+				"PreCompact":       "preCompact",
+			},
+			matcher:       asIsMatcher,
+			timeoutFactor: 1,
+			flat:          true,
+		}, in)
 	}
-
-	desc := parseDescription(content)
-	body := extractBody(content)
-
-	fm := buildFrontmatter([][2]string{
-		{"alwaysApply", "false"},
-		{"description", desc},
-	})
-
-	var out []byte
-	out = append(out, fm...)
-	out = append(out, body...)
-
-	return domain.TransformResult{
-		ToolName:   t.ToolName(),
-		Content:    out,
-		OutputPath: t.OutputPath(entry),
-	}
+	return unsupported("cursor", in.Entry.Type)
 }

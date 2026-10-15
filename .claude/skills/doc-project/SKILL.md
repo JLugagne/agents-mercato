@@ -33,9 +33,11 @@ mct uses **Git repositories as distribution channels** (called "markets"). A mar
 
 3. **Install an entry**: `mct add <market>@<path>` — mct reads the file from the cached clone, validates its YAML frontmatter, recursively resolves skill dependencies (with cycle detection), injects tracking metadata (`mct_ref`, `mct_version`, `mct_checksum`, etc.), writes files to `.claude/`, and records the installation in `~/.cache/mct/installed.json`
 
-4. **Check status**: `mct check` — for every installed entry, mct computes its state by comparing the local file hash (xxhash) against both the recorded version and the latest upstream version. States: clean, update_available, drift, locally_deleted, update_and_drift, deleted, orphaned
+4. **Check status**: `mct check` — for every installed entry, mct computes its state by comparing the local file hash (xxhash) against both the recorded version and the latest upstream version. `update_available` is reported only when the diff between the location's recorded commit and HEAD touches one of the package's own files (unrelated market commits do not flag it; a recorded commit missing from the clone counts as changed). States: clean, update_available, drift, locally_deleted, update_and_drift, deleted, orphaned
 
-5. **Sync updates**: `mct sync` (or `mct refresh` + `mct update` separately) — fetches from all markets, prunes stale install locations and upstream-removed files, then offers to **restore any locally-deleted file** interactively (`[r]/[k]/[a]/[n]` prompt; `--restore-all` / `--restore-none` flags; CI mode skips silently), and finally applies updates. Drift conflicts are handled via policy flags (`--all-keep`, `--all-merge`)
+5. **Sync updates**: `mct sync` (or `mct refresh` + `mct update` separately) — fetches from all markets, prunes stale install locations and upstream-removed files, then offers to **restore any locally-deleted file** interactively (`[r]/[k]/[a]/[n]` prompt; `--restore-all` / `--restore-none` flags; CI mode skips silently), and finally applies updates. Drift conflicts are handled via policy flags (`--all-keep`, `--all-merge`). `--dry-run` reports `would_update` results without writing. Upstream removals are only pruned when git confirms the file is absent (`gitrepo.ErrFileNotFound`); a git failure never deletes local files
+
+   Before updating, `update`/`sync` run `mct migrate` for the project: files written by older mct versions (extension-less single-file skills, legacy hook entries, previous tool formats, removed tools) are converted; locally modified files are kept. `mct migrate --dry-run --all-locations` previews every project.
 
 6. **Audit health**: `mct doctor` — read-only, offline. Surfaces every issue in one shot: drift, locally-deleted files, stale locations, upstream-removed files, orphaned packages. JSON output via `--json` for CI tooling. Run `mct refresh` first if you need a fresh upstream view.
 
@@ -70,13 +72,14 @@ Format is auto-detected on `market add`. The first two path segments form a "pro
 Determined by path convention, not declaration:
 - `.md` file under `agents/` → Agent (installed to `.claude/agents/<name>.md`)
 - `SKILL.md` under `skills/<name>/` → Skill (installed to `.claude/skills/<name>/`)
+- Single-file `skills/<name>.md` → Skill (installed to `.claude/skills/<name>/SKILL.md`, recorded in `InstalledFiles.FlatSkills`; legacy extension-less `.claude/skills/<name>` files are replaced on the next add/update)
 - `.md` file under `commands/` → Command (installed to `.claude/commands/<name>.md`)
 - `.json` file under `hooks/` → Hook (merged into `.claude/settings.json`)
 - Everything else → Ignored by mct
 
-Commands are flat single-file entries (like agents), Claude-Code-specific — other transform targets (codex, gemini, etc.) skip them. Commands support `requires_skills` in frontmatter, resolved via the same dependency engine as skills.
+Commands are flat single-file entries (like agents). Other tools receive them converted (OpenCode/Kilo/pi/Gemini/Qwen/Factory/Junie command files, Windsurf/Cline workflows, or a user-invocable skill for Cursor/Copilot/Kiro/Vibe/Antigravity/DeepCode). Commands support `requires_skills` in frontmatter, resolved via the same dependency engine as skills.
 
-Hooks are JSON snippets, NOT files copied to disk. Install merges the snippet's `hooks[]` array into `.claude/settings.json` under `hooks[<event>]` and injects an `mct_id` field (xxhash of the ref) on every hook object so removal can target the right entries. Drift detection compares the canonical body checksum (mct_id excluded) against the recorded value, so user reformatting doesn't trigger drift but command edits do. Two markets providing hooks with the same `(event, matcher)` are blocked at install with `ErrConflictHookEventMatcher`. Note: `mct hook install` (the existing CLI command) installs **git** hooks for save/restore automation — unrelated to the new `hook` entry type.
+Hooks are JSON snippets, NOT files copied to disk. Install adds the snippet as one Claude Code matcher group `{"matcher": <snippet matcher>, "hooks": [<handlers>]}` under `hooks[<event>]` in `.claude/settings.json`. Claude Code's settings schema rejects unknown keys on matcher groups and handlers, so nothing mct-specific is written there: ownership lives in the sidecar `.claude/mct-hooks.json` (`mct_id` → `{ref, event, matcher, hooks}`, `mct_id` = xxhash of the ref). An owned group is located by exact (event, matcher, handlers) match, falling back to the single unclaimed group with the same matcher and handler types (ambiguity → unresolved, so user groups are never touched). Legacy flat entries (`{type, command, matcher, mct_id}` directly under the event, written by older mct versions) are migrated to groups + sidecar on any install/remove/update; user-owned entries are left as is. Drift compares a canonical checksum of the handlers (group matcher folded in, so pre-migration checksums stay valid) against the recorded value: reformatting is not drift, command edits are. Two markets providing hooks with the same `(event, matcher)` are blocked at install with `ErrConflictHookEventMatcher`; re-installing the same ref replaces its group. Note: `mct hook install` (the existing CLI command) installs **git** hooks for save/restore automation — unrelated to the new `hook` entry type.
 
 ### Dependency Resolution
 
@@ -137,10 +140,16 @@ outbound/txadapter/       → disk-backed transactional staging for atomic insta
 Every mct write path (`Add`, `Update`, `Remove`, `Prune`) opens a per-package
 `tx.Tx` from the `tx.Manager` port. All file writes, deletes, and the install
 database save are buffered in a per-operation staging directory under
-`<cacheDir>/staging/<txID>/`. On `Commit` the manager promotes everything
-atomically (renames where same-fs; copy+remove cross-fs); on `Rollback` or
-process crash nothing on disk has changed. A startup recovery pass replays
-any leftover `committing` staging dirs from a previous crashed run.
+`<cacheDir>/staging/<txID>/`. On `Commit` the manager applies the staged
+operations **in call order** (so `DeleteAll(dir)` then `WriteFile(dir/x)`
+keeps `x`): writes are promoted by rename (copy+remove cross-fs), and a
+`progress` counter is persisted after each operation. On `Rollback` nothing
+on disk has changed. A `Commit` that fails while the process is alive marks
+the tx `failed` and removes its staging dir: it is never replayed, since later
+operations may already have rewritten the same targets (e.g. `installed.json`).
+Only a `committing` dir left by a process that died mid-commit is replayed by
+the startup recovery pass (`App.RecoverPendingTx`, under the install DB lock),
+resuming from `progress`.
 
 ## Package Index
 
@@ -156,7 +165,23 @@ any leftover `committing` staging dirs from a previous crashed run.
 | [outbound/gitadapter](./pkg-outbound-gitadapter.md) | Git adapter | go-git clone/fetch/diff/read, SSH auth |
 | [outbound/fsadapter](./pkg-outbound-fsadapter.md) | Filesystem adapter | Read/write/symlink, MD5 checksums |
 | [outbound/cfgadapter](./pkg-outbound-cfgadapter.md) | Config/state adapter | YAML config, JSON state/installdb, file locking |
+| [domain/transform](./pkg-domain-transform.md) | Multi-tool targets | 22 transformers (opencode, codex, cursor, copilot, gemini, pi, kilo, factory, qwen, kiro, …), shared `.agents/skills`, hook conversion |
 | outbound/txadapter | Tx adapter | Disk-backed staging dir + commit/rollback for atomic install/update/remove |
+
+### Multi-tool targets
+
+Entries are authored for Claude Code; `domain/transform` converts them for
+the tools enabled in config (`tools.<name>: true`, `--tools a,b`) and detected
+in the project (marker dir such as `.codex/`). Unknown tool names are
+rejected (`ErrUnknownTool`). Skills that several tools read go once to
+`.agents/skills/<name>/` (location type `agents`); tools that read
+`.claude/*` natively get nothing. Hooks become JSON patches inside the tool's
+own settings/hooks file (the exact entry is recorded in the install DB so it
+can be spliced out later), per-hook files, or generated TypeScript plugins
+(OpenCode, Kilo, pi). Every written artefact is recorded per tool with its
+`Source` entry; removal, drift and update work from those records, and an
+update deletes artefacts of disabled or removed tools. See
+[pkg-domain-transform.md](./pkg-domain-transform.md).
 
 ## Key Concepts
 

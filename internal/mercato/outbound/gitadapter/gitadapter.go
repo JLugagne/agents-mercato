@@ -1,9 +1,12 @@
 package gitadapter
 
 import (
+	"errors"
 	"fmt"
-	"os"
+	"io"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo"
@@ -20,10 +23,12 @@ var _ gitrepo.GitRepo = (*Adapter)(nil)
 type Adapter struct {
 	sshEnabled bool
 	depth      int
+	progress   io.Writer
+	cloneLocks sync.Map
 }
 
 func New(opts ...Option) *Adapter {
-	a := &Adapter{depth: 1}
+	a := &Adapter{depth: 1, progress: io.Discard}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -44,7 +49,40 @@ func WithDepth(depth int) Option {
 	}
 }
 
+func (a *Adapter) cloneLock(clonePath string) *sync.RWMutex {
+	key := filepath.Clean(clonePath)
+	if abs, err := filepath.Abs(key); err == nil {
+		key = abs
+	}
+	l, _ := a.cloneLocks.LoadOrStore(key, &sync.RWMutex{})
+	return l.(*sync.RWMutex)
+}
+
+func (a *Adapter) lock(clonePath string) func() {
+	l := a.cloneLock(clonePath)
+	l.Lock()
+	return l.Unlock
+}
+
+func (a *Adapter) rlock(clonePath string) func() {
+	l := a.cloneLock(clonePath)
+	l.RLock()
+	return l.RUnlock
+}
+
+// WithProgress sends go-git transfer progress to w. Progress is discarded by
+// default so it never pollutes machine-readable stdout (e.g. --json output).
+func WithProgress(w io.Writer) Option {
+	return func(a *Adapter) {
+		if w == nil {
+			w = io.Discard
+		}
+		a.progress = w
+	}
+}
+
 func (a *Adapter) Clone(url, clonePath string) error {
+	defer a.lock(clonePath)()
 	if isSSHURL(url) && !a.sshEnabled {
 		return domain.ErrSSHDisabled
 	}
@@ -52,7 +90,7 @@ func (a *Adapter) Clone(url, clonePath string) error {
 		URL:      url,
 		Auth:     resolveAuth(url),
 		Depth:    a.depth,
-		Progress: os.Stdout,
+		Progress: a.progress,
 	})
 	return err
 }
@@ -72,7 +110,11 @@ func resolveBranchRef(repo *git.Repository, branch string) (*plumbing.Reference,
 	return ref, nil
 }
 
+// DefaultBranch reports the branch the clone tracks. HEAD is detached after
+// Fetch, so it falls back to origin/HEAD, then to the only remote or local
+// branch, then to probing "main" and "master".
 func (a *Adapter) DefaultBranch(clonePath string) (string, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return "", fmt.Errorf("open repo: %w", err)
@@ -85,10 +127,47 @@ func (a *Adapter) DefaultBranch(clonePath string) (string, error) {
 	if ref.Type() == plumbing.SymbolicReference {
 		return ref.Target().Short(), nil
 	}
-	return "main", nil
+
+	originHead, err := repo.Reference(plumbing.NewRemoteHEADReferenceName("origin"), false)
+	if err == nil && originHead.Type() == plumbing.SymbolicReference {
+		return strings.TrimPrefix(originHead.Target().Short(), "origin/"), nil
+	}
+
+	remote, local := branchNames(repo)
+	if len(remote) == 1 {
+		return remote[0], nil
+	}
+	if len(local) == 1 {
+		return local[0], nil
+	}
+	for _, candidate := range []string{"main", "master"} {
+		if _, err := resolveBranchRef(repo, candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("cannot determine default branch of " + clonePath)
+}
+
+func branchNames(repo *git.Repository) (remote, local []string) {
+	refs, err := repo.References()
+	if err != nil {
+		return nil, nil
+	}
+	_ = refs.ForEach(func(r *plumbing.Reference) error {
+		name := r.Name()
+		switch {
+		case name.IsRemote() && strings.HasPrefix(name.String(), "refs/remotes/origin/") && name.Short() != "origin/HEAD":
+			remote = append(remote, strings.TrimPrefix(name.Short(), "origin/"))
+		case name.IsBranch():
+			local = append(local, name.Short())
+		}
+		return nil
+	})
+	return remote, local
 }
 
 func (a *Adapter) Fetch(clonePath, branch string) (string, error) {
+	defer a.lock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return "", fmt.Errorf("open repo: %w", err)
@@ -103,10 +182,11 @@ func (a *Adapter) Fetch(clonePath, branch string) (string, error) {
 	}
 
 	err = repo.Fetch(&git.FetchOptions{
-		Auth:  resolveAuthFromRepo(repo),
-		Depth: a.depth,
-		Prune: true,
-		Force: false,
+		Auth:     resolveAuthFromRepo(repo),
+		Depth:    a.depth,
+		Prune:    true,
+		Force:    false,
+		Progress: a.progress,
 	})
 	if err != nil && err != git.NoErrAlreadyUpToDate {
 		return "", fmt.Errorf("fetch: %w", err)
@@ -143,6 +223,7 @@ func (a *Adapter) Fetch(clonePath, branch string) (string, error) {
 }
 
 func (a *Adapter) DiffSinceCommit(clonePath, branch, oldSHA string) ([]domain.FileDiff, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("open repo: %w", err)
@@ -218,6 +299,7 @@ func (a *Adapter) DiffSinceCommit(clonePath, branch, oldSHA string) ([]domain.Fi
 }
 
 func (a *Adapter) ReadFileAtRef(clonePath, branch, filePath, commitSHA string) ([]byte, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("open repo: %w", err)
@@ -258,31 +340,50 @@ func (a *Adapter) ReadFileAtRef(clonePath, branch, filePath, commitSHA string) (
 }
 
 func (a *Adapter) FileVersion(clonePath, filePath string) (domain.MctVersion, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
-		return "", fmt.Errorf("open repo: %w", err)
+		return "", errors.Join(errors.New("open repo"), err)
 	}
 
-	logs, err := repo.Log(&git.LogOptions{
-		FileName: &filePath,
-		Order:    git.LogOrderCommitterTime,
-	})
+	head, err := repo.Head()
 	if err != nil {
-		return "", fmt.Errorf("git log: %w", err)
+		return "", errors.Join(errors.New("resolve HEAD"), err)
 	}
-
-	commit, err := logs.Next()
+	commit, err := repo.CommitObject(head.Hash())
 	if err != nil {
-		return "", fmt.Errorf("get first commit: %w", err)
+		return "", errors.Join(errors.New("resolve HEAD commit"), err)
 	}
 
-	sha := commit.Hash.String()
-	version := sha[:7] + "\u00b7" + commit.Author.When.Format("2006-01-02")
+	file, err := commit.File(filePath)
+	if errors.Is(err, object.ErrFileNotFound) {
+		return "", gitrepo.ErrFileNotFound
+	}
+	if err != nil {
+		return "", errors.Join(errors.New("read file at HEAD"), err)
+	}
 
-	return domain.MctVersion(version), nil
+	for commit.NumParents() > 0 {
+		parent, err := commit.Parent(0)
+		if err != nil {
+			break
+		}
+		pf, err := parent.File(filePath)
+		if err != nil || pf.Hash != file.Hash {
+			break
+		}
+		commit = parent
+	}
+
+	return commitVersion(commit), nil
+}
+
+func commitVersion(c *object.Commit) domain.MctVersion {
+	return domain.MctVersion(c.Hash.String()[:7] + "\u00b7" + c.Author.When.Format("2006-01-02"))
 }
 
 func (a *Adapter) RemoteHEAD(clonePath, branch string) (string, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return "", fmt.Errorf("open repo: %w", err)
@@ -297,6 +398,7 @@ func (a *Adapter) RemoteHEAD(clonePath, branch string) (string, error) {
 }
 
 func (a *Adapter) ListFiles(clonePath, branch string) ([]string, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("open repo: %w", err)
@@ -334,6 +436,7 @@ func (a *Adapter) ListFiles(clonePath, branch string) ([]string, error) {
 }
 
 func (a *Adapter) ReadMarketFiles(clonePath, branch string) ([]gitrepo.MarketFile, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("open repo: %w", err)
@@ -378,7 +481,7 @@ func (a *Adapter) ReadMarketFiles(clonePath, branch string) ([]gitrepo.MarketFil
 		return nil, fmt.Errorf("walk files: %w", err)
 	}
 
-	versionByPath := batchFileVersions(repo, paths)
+	versionByPath := batchFileVersions(commit, paths)
 
 	result := make([]gitrepo.MarketFile, 0, len(paths))
 	for _, p := range paths {
@@ -392,6 +495,7 @@ func (a *Adapter) ReadMarketFiles(clonePath, branch string) ([]gitrepo.MarketFil
 }
 
 func (a *Adapter) ListDirFiles(clonePath, branch, dirPrefix string) ([]string, error) {
+	defer a.rlock(clonePath)()
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("open repo: %w", err)
@@ -430,85 +534,53 @@ func (a *Adapter) ListDirFiles(clonePath, branch, dirPrefix string) ([]string, e
 	return paths, nil
 }
 
-var errStopIter = fmt.Errorf("stop")
-
-// batchFileVersions walks the commit log once and returns the last-modified
-// version string for each file path.
-func batchFileVersions(repo *git.Repository, paths []string) map[string]domain.MctVersion {
+// batchFileVersions walks the first-parent history from tip once and returns
+// the last-modified version for each path. Paths unchanged down to the root or
+// the shallow boundary are attributed to the oldest reachable commit.
+func batchFileVersions(tip *object.Commit, paths []string) map[string]domain.MctVersion {
 	versions := make(map[string]domain.MctVersion, len(paths))
 	remaining := make(map[string]struct{}, len(paths))
 	for _, p := range paths {
 		remaining[p] = struct{}{}
 	}
 
-	logs, err := repo.Log(&git.LogOptions{Order: git.LogOrderCommitterTime})
-	if err != nil {
-		return versions
-	}
-
-	var prevCommit *object.Commit
-	_ = logs.ForEach(func(c *object.Commit) error {
-		if len(remaining) == 0 {
-			return errStopIter
-		}
-
-		if prevCommit == nil {
-			prevCommit = c
-			return nil
-		}
-
-		// Compare previous (newer) commit tree with current (older) commit tree.
-		prevTree, err := prevCommit.Tree()
+	commit := tip
+	for len(remaining) > 0 && commit.NumParents() > 0 {
+		parent, err := commit.Parent(0)
 		if err != nil {
-			prevCommit = c
-			return nil
+			break
 		}
-		curTree, err := c.Tree()
+		curTree, err := commit.Tree()
 		if err != nil {
-			prevCommit = c
-			return nil
+			break
 		}
-
-		changes, err := prevTree.Diff(curTree)
+		parentTree, err := parent.Tree()
 		if err != nil {
-			prevCommit = c
-			return nil
+			break
 		}
-
+		changes, err := parentTree.Diff(curTree)
+		if err != nil {
+			break
+		}
 		for _, change := range changes {
-			// Check both From and To names for the changed file.
 			for _, name := range []string{change.From.Name, change.To.Name} {
-				if name == "" {
-					continue
+				if _, need := remaining[name]; need {
+					versions[name] = commitVersion(commit)
+					delete(remaining, name)
 				}
-				if _, need := remaining[name]; !need {
-					continue
-				}
-				// prevCommit is the newer commit where this file last changed.
-				sha := prevCommit.Hash.String()
-				ver := sha[:7] + "\u00b7" + prevCommit.Author.When.Format("2006-01-02")
-				versions[name] = domain.MctVersion(ver)
-				delete(remaining, name)
 			}
 		}
-
-		prevCommit = c
-		return nil
-	})
-
-	// Files still remaining were only touched in the very first commit.
-	if prevCommit != nil {
-		for p := range remaining {
-			sha := prevCommit.Hash.String()
-			ver := sha[:7] + "\u00b7" + prevCommit.Author.When.Format("2006-01-02")
-			versions[p] = domain.MctVersion(ver)
-		}
+		commit = parent
 	}
 
+	for p := range remaining {
+		versions[p] = commitVersion(commit)
+	}
 	return versions
 }
 
 func (a *Adapter) IsValidRepo(clonePath string) bool {
+	defer a.rlock(clonePath)()
 	_, err := git.PlainOpen(clonePath)
 	return err == nil
 }

@@ -132,32 +132,6 @@ func TestToolMappings_Exist(t *testing.T) {
 	}
 }
 
-func TestToolMappings_DefaultsNonNil(t *testing.T) {
-	adapter := NewToolMappingStore()
-	defaults := adapter.DefaultToolMappings()
-
-	if defaults.Models == nil {
-		t.Fatal("expected non-nil Models map")
-	}
-	if defaults.Tools == nil {
-		t.Fatal("expected non-nil Tools map")
-	}
-
-	expectedModels := []string{"opus", "sonnet", "haiku"}
-	for _, name := range expectedModels {
-		if _, ok := defaults.Models[name]; !ok {
-			t.Errorf("expected model key %q in defaults", name)
-		}
-	}
-
-	expectedTools := []string{"Read", "Edit", "Bash", "Write", "Glob", "Grep"}
-	for _, name := range expectedTools {
-		if _, ok := defaults.Tools[name]; !ok {
-			t.Errorf("expected tool key %q in defaults", name)
-		}
-	}
-}
-
 func TestToolMappings_LoadNilMapsInitialized(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tool-mappings.yml")

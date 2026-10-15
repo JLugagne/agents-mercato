@@ -1,41 +1,21 @@
 package transform
 
-import (
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
-)
+import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
 
-// RooCodeTransformer converts skills to Roo Code .roocode.rules files.
+// RooCodeTransformer is a legacy target kept for existing installs: Roo Code
+// shut down in 2026-05. Only skills are converted, into .roo/rules.
 type RooCodeTransformer struct{}
 
-func (t *RooCodeTransformer) ToolName() string { return "roocode" }
+func (RooCodeTransformer) ToolName() string { return "roocode" }
 
-func (t *RooCodeTransformer) SupportsEntry(entryType domain.EntryType) bool {
-	return entryType == domain.EntryTypeSkill
-}
+func (RooCodeTransformer) Detect() []string { return []string{".roo", ".roorules"} }
 
-func (t *RooCodeTransformer) OutputPath(entry domain.Entry) string {
-	return ".roocode.rules"
-}
-
-func (t *RooCodeTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	if entry.Type == domain.EntryTypeAgent {
-		return domain.TransformResult{
-			ToolName:   t.ToolName(),
-			Skipped:    true,
-			SkipReason: "roocode does not support agents",
-		}
+func (RooCodeTransformer) Transform(in domain.TransformInput) domain.TransformResult {
+	if in.Entry.Type != domain.EntryTypeSkill {
+		return unsupported("roocode", in.Entry.Type)
 	}
-
-	body := extractBody(content)
-
-	var out []byte
-	out = append(out, []byte("# "+string(entry.RelPath)+"\n\n")...)
-	out = append(out, body...)
-	out = append(out, '\n')
-
-	return domain.TransformResult{
-		ToolName:   t.ToolName(),
-		Content:    out,
-		OutputPath: t.OutputPath(entry),
-	}
+	name := skillName(entryStem(in.Entry))
+	body := parseDoc(in.Content).body
+	out := []domain.OutputFile{{Path: ".roo/rules/" + name + ".md", Content: []byte("# " + name + "\n\n" + string(body))}}
+	return files("roocode", out)
 }

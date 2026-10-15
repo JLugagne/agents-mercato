@@ -39,13 +39,13 @@ func newRefreshCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 					continue
 				}
 				if r.OldSHA == r.NewSHA {
-					cmd.Printf("  ok  %s (up to date at %s)\n", r.Market, r.NewSHA[:7])
+					cmd.Printf("  ok  %s (up to date at %s)\n", r.Market, shortSHA(r.NewSHA))
 				} else {
 					upd := ""
 					if r.UpdatesAvailable > 0 {
 						upd = fmt.Sprintf(", %d updates available", r.UpdatesAvailable)
 					}
-					cmd.Printf("  up  %s %s -> %s (%d files changed%s)\n", r.Market, r.OldSHA[:7], r.NewSHA[:7], r.ChangedFiles, upd)
+					cmd.Printf("  up  %s %s -> %s (%d files changed%s)\n", r.Market, shortSHA(r.OldSHA), shortSHA(r.NewSHA), r.ChangedFiles, upd)
 				}
 			}
 			return nil
@@ -95,8 +95,16 @@ func newUpdateCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 					cmd.Printf("  ~  %s has local changes in: %s\n", r.Ref, strings.Join(r.DriftFiles, ", "))
 				} else if r.Action == "kept" {
 					cmd.Printf("  ~  %s kept (local changes preserved)\n", r.Ref)
+				} else if r.Action == "migrated" || r.Action == "would_migrate" {
+					cmd.Printf("  %s  %s  %s\n", r.Action, r.Ref, r.Location)
 				} else {
 					cmd.Printf("  %s  %s %s -> %s\n", r.Action, r.Ref, r.OldVersion, r.NewVersion)
+				}
+				for _, d := range r.Details {
+					cmd.Printf("     %s\n", d)
+				}
+				for _, w := range r.Warnings {
+					cmd.PrintErrf("  !  %s\n", w)
 				}
 			}
 			return nil
@@ -124,6 +132,7 @@ func newSyncCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			acceptBreaking, _ := cmd.Flags().GetBool("accept-breaking")
 			allMerge, _ := cmd.Flags().GetBool("all-merge")
+			allKeep, _ := cmd.Flags().GetBool("all-keep")
 			allLocations, _ := cmd.Flags().GetBool("all")
 			restoreAll, _ := cmd.Flags().GetBool("restore-all")
 			restoreNone, _ := cmd.Flags().GetBool("restore-none")
@@ -168,6 +177,7 @@ func newSyncCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 				CI:             opts.CI,
 				AcceptBreaking: acceptBreaking,
 				AllMerge:       allMerge,
+				AllKeep:        allKeep,
 				AllLocations:   allLocations,
 			})
 			if err != nil {
@@ -214,10 +224,16 @@ func newSyncCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 				if r.Refresh.Err != nil {
 					cmd.PrintErrf("  x  %s: %v\n", r.Refresh.Market, r.Refresh.Err)
 				} else {
-					cmd.Printf("  up  %s %s -> %s\n", r.Refresh.Market, r.Refresh.OldSHA[:7], r.Refresh.NewSHA[:7])
+					cmd.Printf("  up  %s %s -> %s\n", r.Refresh.Market, shortSHA(r.Refresh.OldSHA), shortSHA(r.Refresh.NewSHA))
 				}
 				for _, u := range r.Updates {
 					cmd.Printf("     %s  %s  %s\n", u.Action, u.Ref, u.Location)
+					for _, d := range u.Details {
+						cmd.Printf("        %s\n", d)
+					}
+					for _, w := range u.Warnings {
+						cmd.PrintErrf("     !  %s\n", w)
+					}
 				}
 			}
 			return nil
@@ -227,6 +243,7 @@ func newSyncCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 	cmd.Flags().Bool("dry-run", false, "preview changes")
 	cmd.Flags().Bool("accept-breaking", false, "accept breaking changes")
 	cmd.Flags().Bool("all-merge", false, "merge all changes")
+	cmd.Flags().Bool("all-keep", false, "keep all local changes")
 	cmd.Flags().Bool("all", false, "update all locations where entries are installed")
 	cmd.Flags().Bool("restore-all", false, "restore every locally-deleted file without prompting")
 	cmd.Flags().Bool("restore-none", false, "skip restoring locally-deleted files (no prompt)")
@@ -258,6 +275,7 @@ func newCheckCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 				domain.StateDrift:           "~",
 				domain.StateUpdateAndDrift:  "!",
 				domain.StateDeleted:         "x",
+				domain.StateLocallyDeleted:  "-",
 				domain.StateNewInRegistry:   "+",
 				domain.StateOrphaned:        "o",
 				domain.StateUnknown:         "?",
@@ -774,7 +792,7 @@ func newSyncStateCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 				return printJSON(cmd.OutOrStdout(), state)
 			}
 			for name, ms := range state.Markets {
-				cmd.Printf("  %s: %s (%s) synced %s\n", name, ms.LastSyncedSHA[:7], ms.Status, ms.LastSyncedAt.Format("2006-01-02 15:04"))
+				cmd.Printf("  %s: %s (%s) synced %s\n", name, shortSHA(ms.LastSyncedSHA), ms.Status, ms.LastSyncedAt.Format("2006-01-02 15:04"))
 			}
 			return nil
 		},
@@ -833,4 +851,11 @@ func newInitCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 			})
 		},
 	}
+}
+
+func shortSHA(sha string) string {
+	if len(sha) <= 7 {
+		return sha
+	}
+	return sha[:7]
 }

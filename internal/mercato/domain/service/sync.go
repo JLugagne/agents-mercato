@@ -14,6 +14,26 @@ type SyncCommands interface {
 	Sync(opts SyncOpts) ([]SyncResult, error)
 	DetectDeleted(opts DetectDeletedOpts) ([]DeletedFile, error)
 	RestoreDeleted(files []DeletedFile, opts RestoreOpts) ([]RestoreResult, error)
+	Migrate(opts MigrateOpts) ([]MigrateResult, error)
+}
+
+// MigrateOpts scopes Migrate to the current project unless AllLocations is
+// set. DryRun reports the actions without writing anything.
+type MigrateOpts struct {
+	AllLocations bool
+	DryRun       bool
+}
+
+// MigrateResult lists what was (or, on DryRun, would be) converted to the
+// current file layout at one location. Market and Profile are empty for
+// location-wide actions such as the settings.json hook conversion.
+type MigrateResult struct {
+	Market   string   `json:"market,omitempty"`
+	Profile  string   `json:"profile,omitempty"`
+	Location string   `json:"location"`
+	Actions  []string `json:"actions"`
+	Warnings []string `json:"warnings,omitempty"`
+	Err      error    `json:"error,omitempty"`
 }
 
 type CheckOpts struct {
@@ -49,6 +69,7 @@ type SyncOpts struct {
 	CI             bool
 	AcceptBreaking bool
 	AllMerge       bool
+	AllKeep        bool
 	AllLocations   bool
 }
 
@@ -70,6 +91,8 @@ type UpdateResult struct {
 	OldVersion domain.MctVersion `json:"old_version"`
 	NewVersion domain.MctVersion `json:"new_version"`
 	DriftFiles []string          `json:"drift_files,omitempty"`
+	Details    []string          `json:"details,omitempty"`
+	Warnings   []string          `json:"warnings,omitempty"`
 	Err        error             `json:"error,omitempty"`
 }
 
@@ -99,7 +122,7 @@ type RestoreOpts struct {
 }
 
 type RestoreResult struct {
-	File    DeletedFile `json:"file"`
-	Action  string      `json:"action"` // "restored" | "failed"
-	Err     error       `json:"error,omitempty"`
+	File   DeletedFile `json:"file"`
+	Action string      `json:"action"` // "restored" | "failed"
+	Err    error       `json:"error,omitempty"`
 }

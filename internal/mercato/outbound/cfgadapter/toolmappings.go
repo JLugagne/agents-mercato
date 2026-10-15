@@ -36,6 +36,8 @@ func (a *ToolMappingStoreAdapter) LoadToolMappings(path string) (domain.ToolMapp
 	if m.Tools == nil {
 		m.Tools = make(map[string]map[string]string)
 	}
+	dropLegacyInitValues(m.Models, legacyInitModels)
+	dropLegacyInitValues(m.Tools, legacyInitTools)
 	return m, nil
 }
 
@@ -48,7 +50,7 @@ func (a *ToolMappingStoreAdapter) SaveToolMappings(path string, m domain.ToolMap
 	if err != nil {
 		return fmt.Errorf("marshal tool mappings: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return writeFileAtomic(path, data, 0644)
 }
 
 func (a *ToolMappingStoreAdapter) ToolMappingsExist(path string) bool {
@@ -56,38 +58,35 @@ func (a *ToolMappingStoreAdapter) ToolMappingsExist(path string) bool {
 	return err == nil
 }
 
+// DefaultToolMappings returns empty overrides: per-tool defaults live in the
+// transformers, and this file only holds the user's own overrides.
 func (a *ToolMappingStoreAdapter) DefaultToolMappings() domain.ToolMapping {
 	return domain.ToolMapping{
-		Models: map[string]map[string]string{
-			"opus": {
-				"opencode": "anthropic/claude-opus-4-20250514",
-				"cursor":   "",
-				"windsurf": "",
-				"codex":    "",
-				"gemini":   "",
-			},
-			"sonnet": {
-				"opencode": "anthropic/claude-sonnet-4-20250514",
-				"cursor":   "",
-				"windsurf": "",
-				"codex":    "",
-				"gemini":   "",
-			},
-			"haiku": {
-				"opencode": "anthropic/claude-haiku-4-5-20251001",
-				"cursor":   "",
-				"windsurf": "",
-				"codex":    "",
-				"gemini":   "",
-			},
-		},
-		Tools: map[string]map[string]string{
-			"Read":  {"opencode": "read"},
-			"Edit":  {"opencode": "edit"},
-			"Bash":  {"opencode": "bash"},
-			"Write": {"opencode": "write"},
-			"Glob":  {"opencode": "glob"},
-			"Grep":  {"opencode": "grep"},
-		},
+		Models: make(map[string]map[string]string),
+		Tools:  make(map[string]map[string]string),
+	}
+}
+
+var legacyInitModels = map[string]map[string]string{
+	"opus":   {"opencode": "anthropic/claude-opus-4-20250514", "cursor": "", "windsurf": "", "codex": "", "gemini": ""},
+	"sonnet": {"opencode": "anthropic/claude-sonnet-4-20250514", "cursor": "", "windsurf": "", "codex": "", "gemini": ""},
+	"haiku":  {"opencode": "anthropic/claude-haiku-4-5-20251001", "cursor": "", "windsurf": "", "codex": "", "gemini": ""},
+}
+
+var legacyInitTools = map[string]map[string]string{
+	"Read": {"opencode": "read"}, "Edit": {"opencode": "edit"}, "Bash": {"opencode": "bash"},
+	"Write": {"opencode": "write"}, "Glob": {"opencode": "glob"}, "Grep": {"opencode": "grep"},
+}
+
+func dropLegacyInitValues(m, legacy map[string]map[string]string) {
+	for key, byTool := range m {
+		for tool, v := range byTool {
+			if lv, ok := legacy[key][tool]; ok && lv == v {
+				delete(byTool, tool)
+			}
+		}
+		if len(byTool) == 0 {
+			delete(m, key)
+		}
 	}
 }

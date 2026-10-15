@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -17,9 +15,19 @@ import (
 
 var _ installdb.InstallDB = (*InstallDBAdapter)(nil)
 
-type InstallDBAdapter struct{}
+// InstallDBAdapter persists installed.json. Lock/Unlock use an OS-level
+// exclusive lock on installed.lock (flock on unix, LockFileEx on Windows),
+// so a crashed process never leaves a stale lock behind and Unlock only
+// releases a lock this adapter acquired.
+type InstallDBAdapter struct {
+	lockTimeout time.Duration
+	lockPoll    time.Duration
+	locks       fileLocker
+}
 
-func NewInstallDB() *InstallDBAdapter { return &InstallDBAdapter{} }
+func NewInstallDB() *InstallDBAdapter {
+	return &InstallDBAdapter{lockTimeout: 5 * time.Second, lockPoll: 100 * time.Millisecond}
+}
 
 func (a *InstallDBAdapter) Load(cacheDir string) (domain.InstallDatabase, error) {
 	path := filepath.Join(cacheDir, "installed.json")
@@ -233,7 +241,7 @@ func (a *InstallDBAdapter) Save(cacheDir string, db domain.InstallDatabase) erro
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(a.Path(cacheDir), data, 0600)
+	return writeFileAtomic(a.Path(cacheDir), data, 0600)
 }
 
 // Marshal returns installed.json's on-disk byte representation.
@@ -253,71 +261,12 @@ func (a *InstallDBAdapter) Path(cacheDir string) string {
 	return filepath.Join(cacheDir, "installed.json")
 }
 
+// Lock blocks for up to five seconds and returns domain.ErrLockContention
+// when another process (or another Lock on the same cache dir) holds it.
 func (a *InstallDBAdapter) Lock(cacheDir string) error {
-	lockPath := filepath.Join(cacheDir, "installed.lock")
-
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return err
-	}
-
-	if err := a.tryLock(lockPath); err == nil {
-		return nil
-	}
-
-	// Lock file exists — check for stale lock.
-	if a.removeStaleLock(lockPath) {
-		// Stale lock removed, retry once.
-		if err := a.tryLock(lockPath); err == nil {
-			return nil
-		}
-	}
-
-	// Poll for up to 5 seconds.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		if err := a.tryLock(lockPath); err == nil {
-			return nil
-		}
-	}
-
-	return domain.ErrLockContention
+	return a.locks.lock(filepath.Join(cacheDir, "installed.lock"), a.lockTimeout, a.lockPoll)
 }
 
 func (a *InstallDBAdapter) Unlock(cacheDir string) error {
-	lockPath := filepath.Join(cacheDir, "installed.lock")
-	err := os.Remove(lockPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-func (a *InstallDBAdapter) tryLock(lockPath string) error {
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	_, err = fmt.Fprintf(f, "%d", os.Getpid())
-	return err
-}
-
-// removeStaleLock checks whether the lock file's PID is still running.
-// Returns true if the stale lock was removed.
-func (a *InstallDBAdapter) removeStaleLock(lockPath string) bool {
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		return false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return false
-	}
-	if processExists(pid) {
-		// Process exists — lock is not stale.
-		return false
-	}
-	_ = os.Remove(lockPath)
-	return true
+	return a.locks.unlock(filepath.Join(cacheDir, "installed.lock"))
 }

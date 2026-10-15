@@ -40,10 +40,10 @@ Parsed from YAML header in .md files. Fields: name, description, author, version
 
 ### InstallDatabase (schema v2)
 Tracks all installed packages across all projects. Keyed by market name, then by profile. Each package carries:
-- `Files` — package-wide skill/agent/command/hook leaf names (drives sync diffs and ref enumeration). `InstalledFiles` has `Skills`, `Agents`, `Commands`, and `Hooks []string` fields. For hooks, the per-location `InstalledFile.Path` uses a `<settings.json>#hooks/<file>` suffix so multiple hooks per package keep distinct per-hook checksums.
+- `Files` — package-wide skill/agent/command/hook leaf names (drives sync diffs and ref enumeration). `InstalledFiles` has `Skills`, `FlatSkills` (subset of `Skills` installed from a single-file `skills/<name>.md`; `IsFlatSkill(name)`), `Agents`, `Commands`, and `Hooks []string` fields; `MergePackageFiles` unions all of them. For hooks, the per-location `InstalledFile.Path` uses a `<settings.json>#hooks/<file>` suffix so multiple hooks per package keep distinct per-hook checksums.
 - `Locations []InstalledLocation` — one entry per (project path, runtime type). The same project path appears multiple times when a package was installed for several runtimes (e.g. claude-code + cursor).
 
-`InstalledLocation { Path, Type, Files []InstalledFile }` — `Type` is `claude-code`, `cursor`, `windsurf`, etc. (taken from `Transformer.ToolName()` for non-claude tools, the constant `RuntimeTypeClaudeCode` for the built-in path). `Files []InstalledFile { Path, XXH }` records every file actually written, with its xxhash64 at install/update time. This is the source of truth for drift detection AND for prune-on-update: each `AddOrUpdatePackage` call replaces the (Path, Type) entry's `Files` wholesale, and the sync flow diffs old vs. new to delete files dropped upstream. For single-entry adds the caller composes the full set with `MergeLocationFiles` / `MergePackageFiles` before calling.
+`InstalledLocation { Path, Type, Version, Files []InstalledFile }` — `Version` is the market commit this location was last synced to (empty on legacy DBs; use `InstalledPackage.VersionAt(path)` / `SetVersionAt(path, sha)`, never `pkg.Version` directly). `AddOrUpdatePackage` keeps an existing path's version when adding a sibling entry so pending updates are not skipped. `Type` is `claude-code`, `cursor`, `windsurf`, etc. (taken from `Transformer.ToolName()` for non-claude tools, the constant `RuntimeTypeClaudeCode` for the built-in path). `Files []InstalledFile { Path, XXH, Source, Data }` records every file actually written (`Source` = repo path of the producing entry for tool files; a `Path` containing `#` is a JSON hook patch anchor `<file>#<keys>/<event>` and `Data` holds the exact entry; type `agents` = shared `.agents/` files), with its xxhash64 at install/update time. This is the source of truth for drift detection AND for prune-on-update: each `AddOrUpdatePackage` call replaces the (Path, Type) entry's `Files` wholesale, and the sync flow diffs old vs. new to delete files dropped upstream. For single-entry adds the caller composes the full set with `MergeLocationFiles` (replaces whole records; hook patches keyed by anchor + Source) / `MergePackageFiles` before calling.
 
 `InstallSchemaVersion = 2`. The cfgadapter auto-migrates v1 (`Locations []string` + flat `ToolChecksums` map) on load by walking each location's on-disk `.claude/` tree, hashing every file present, and classifying by the leading dot-folder via `RuntimeTypeForDotDir`. The migrated DB is persisted back so subsequent loads are fast.
 
@@ -57,3 +57,12 @@ Grouped by category:
 - **Sync**: SYNC_DIRTY, CACHE_STALE, OFFLINE_MODE
 - **Conflict**: CONFLICT_REF_COLLISION, CONFLICT_DEP_VERSION, CONFLICT_DEP_DELETED
 - **Infrastructure**: CLONE_EXISTS, SSH_DISABLED, LOCK_CONTENTION, STALE_LOCK, DRIFT_DETECTED, DEPENDENCY_CYCLE, PATH_TRAVERSAL
+
+## Transformer contract (`transformer.go`)
+
+`Transformer{ToolName, Detect, Transform(TransformInput) TransformResult}`,
+`OutputFile`, `HookPatch` (`Anchor()`), `TransformAsset`, `ToolMapping` (user
+overrides only), `TransformerRegistry` (`EnabledTransformers` sorted, `Names`),
+`RuntimeTypeSharedAgents = "agents"`. Implementations: see
+[pkg-domain-transform.md](./pkg-domain-transform.md). `ErrUnknownTool` is
+returned for tool names without a transformer.

@@ -2,9 +2,11 @@ package cfgadapter
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
@@ -13,7 +15,13 @@ import (
 
 var _ statestore.StateStore = (*StateStoreAdapter)(nil)
 
-type StateStoreAdapter struct{}
+// StateStoreAdapter persists sync-state.json. SetMarketSyncDirty and
+// SetMarketSyncClean serialize their read-modify-write across goroutines and
+// processes through sync-state.lock and may return domain.ErrLockContention.
+type StateStoreAdapter struct {
+	mu    sync.Mutex
+	locks fileLocker
+}
 
 func NewStateStore() *StateStoreAdapter { return &StateStoreAdapter{} }
 
@@ -48,29 +56,36 @@ func (s *StateStoreAdapter) SaveSyncState(cacheDir string, state domain.SyncStat
 	if err != nil {
 		return fmt.Errorf("marshal sync state: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	return writeFileAtomic(path, data, 0600)
 }
 
 func (s *StateStoreAdapter) SetMarketSyncDirty(cacheDir string, market string) error {
-	state, err := s.LoadSyncState(cacheDir)
-	if err != nil {
-		return err
-	}
-	ms := state.Markets[market]
-	ms.Status = "dirty"
-	state.Markets[market] = ms
-	return s.SaveSyncState(cacheDir, state)
+	return s.updateMarket(cacheDir, market, func(ms *domain.MarketSyncState) {
+		ms.Status = "dirty"
+	})
 }
 
 func (s *StateStoreAdapter) SetMarketSyncClean(cacheDir string, market string, newSHA string) error {
-	state, err := s.LoadSyncState(cacheDir)
-	if err != nil {
+	return s.updateMarket(cacheDir, market, func(ms *domain.MarketSyncState) {
+		ms.Status = "clean"
+		ms.LastSyncedSHA = newSHA
+		ms.LastSyncedAt = time.Now().UTC()
+	})
+}
+
+func (s *StateStoreAdapter) updateMarket(cacheDir, market string, mutate func(*domain.MarketSyncState)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lockPath := filepath.Join(cacheDir, "sync-state.lock")
+	if err := s.locks.lock(lockPath, 5*time.Second, 20*time.Millisecond); err != nil {
 		return err
 	}
-	ms := state.Markets[market]
-	ms.Status = "clean"
-	ms.LastSyncedSHA = newSHA
-	ms.LastSyncedAt = time.Now().UTC()
-	state.Markets[market] = ms
-	return s.SaveSyncState(cacheDir, state)
+	state, err := s.LoadSyncState(cacheDir)
+	if err == nil {
+		ms := state.Markets[market]
+		mutate(&ms)
+		state.Markets[market] = ms
+		err = s.SaveSyncState(cacheDir, state)
+	}
+	return errors.Join(err, s.locks.unlock(lockPath))
 }

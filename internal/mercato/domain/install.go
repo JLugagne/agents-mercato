@@ -1,6 +1,10 @@
 package domain
 
-import "slices"
+import (
+	"encoding/json"
+	"slices"
+	"strings"
+)
 
 // InstallSchemaVersion is the current installed.json schema version.
 // v1 (implicit) recorded Locations as []string and tool hashes in a flat
@@ -31,27 +35,52 @@ type InstalledPackage struct {
 // InstalledLocation records one project install of a package, including the
 // runtime that consumed it (claude-code, cursor, opencode, ...) and the exact
 // files written with their xxhash64 at install time.
+//
+// Version is the market commit the files at this location were last synced
+// to. Empty on databases written before per-location versions existed, in
+// which case the package Version applies.
 type InstalledLocation struct {
-	Path  string          `json:"path"`
-	Type  string          `json:"type"`
-	Files []InstalledFile `json:"files,omitempty"`
+	Path    string          `json:"path"`
+	Type    string          `json:"type"`
+	Version string          `json:"version,omitempty"`
+	Files   []InstalledFile `json:"files,omitempty"`
 }
 
 // InstalledFile is one file written into a location, with its xxhash64 at
 // the time of install or last update. Path is project-relative.
+//
+// For files written by a Transformer, Source is the repo path of the entry
+// that produced the file. A Path containing "#" is a HookPatch anchor
+// (HookPatch.Anchor) and Data holds the exact JSON entry appended there.
 type InstalledFile struct {
-	Path string `json:"path"`
-	XXH  string `json:"xxh"`
+	Path   string          `json:"path"`
+	XXH    string          `json:"xxh"`
+	Source string          `json:"source,omitempty"`
+	Data   json.RawMessage `json:"data,omitempty"`
+}
+
+// IsHookPatch reports whether the record is a JSON patch inside a shared file
+// rather than a file of its own.
+func (f InstalledFile) IsHookPatch() bool {
+	return strings.Contains(f.Path, "#")
 }
 
 // InstalledFiles lists the leaf names of installed skills and agents.
 // This is package-level metadata used to drive sync diffs and refs; the
 // authoritative on-disk file list lives in InstalledLocation.Files.
 type InstalledFiles struct {
-	Skills   []string `json:"skills,omitempty"`
-	Agents   []string `json:"agents,omitempty"`
-	Commands []string `json:"commands,omitempty"`
-	Hooks    []string `json:"hooks,omitempty"`
+	Skills []string `json:"skills,omitempty"`
+	// FlatSkills lists the Skills that come from a single-file skill
+	// (skills/<name>.md) instead of a skill directory; both are installed as
+	// .claude/skills/<name>/SKILL.md.
+	FlatSkills []string `json:"flat_skills,omitempty"`
+	Agents     []string `json:"agents,omitempty"`
+	Commands   []string `json:"commands,omitempty"`
+	Hooks      []string `json:"hooks,omitempty"`
+}
+
+func (f InstalledFiles) IsFlatSkill(name string) bool {
+	return slices.Contains(f.FlatSkills, name)
 }
 
 // FindPackage returns a pointer to the installed package for the given market
@@ -134,6 +163,11 @@ func (db *InstallDatabase) AddOrUpdatePackage(market, profile, version string, f
 		pkg = &m.Packages[len(m.Packages)-1]
 	}
 
+	location.Version = version
+	if pkg.FindLocation(location.Path) != nil {
+		location.Version = pkg.VersionAt(location.Path)
+	}
+	pkg.pinLegacyLocationVersions()
 	pkg.Version = version
 	pkg.Files = files
 
@@ -144,6 +178,37 @@ func (db *InstallDatabase) AddOrUpdatePackage(market, profile, version string, f
 		}
 	}
 	pkg.Locations = append(pkg.Locations, location)
+}
+
+// VersionAt returns the market commit the files at the given project path
+// were synced to, falling back to the package Version for legacy entries.
+func (p *InstalledPackage) VersionAt(path string) string {
+	for _, loc := range p.Locations {
+		if loc.Path == path && loc.Version != "" {
+			return loc.Version
+		}
+	}
+	return p.Version
+}
+
+// SetVersionAt records that every runtime location at path is now synced to
+// version, without moving the other project paths forward.
+func (p *InstalledPackage) SetVersionAt(path, version string) {
+	p.pinLegacyLocationVersions()
+	for i := range p.Locations {
+		if p.Locations[i].Path == path {
+			p.Locations[i].Version = version
+		}
+	}
+	p.Version = version
+}
+
+func (p *InstalledPackage) pinLegacyLocationVersions() {
+	for i := range p.Locations {
+		if p.Locations[i].Version == "" {
+			p.Locations[i].Version = p.VersionAt(p.Locations[i].Path)
+		}
+	}
 }
 
 // mergeLocationFiles merges incoming file entries into existing, replacing
@@ -161,8 +226,8 @@ func MergeLocationFiles(existing, incoming []InstalledFile) []InstalledFile {
 	for _, f := range incoming {
 		replaced := false
 		for i := range out {
-			if out[i].Path == f.Path {
-				out[i].XXH = f.XXH
+			if out[i].Path == f.Path && (!f.IsHookPatch() || out[i].Source == f.Source) {
+				out[i] = f
 				replaced = true
 				break
 			}
@@ -176,16 +241,18 @@ func MergeLocationFiles(existing, incoming []InstalledFile) []InstalledFile {
 
 // MergePackageFiles returns the union of existing and incoming leaf-name
 // lists. Used alongside MergeLocationFiles for incremental adds.
-// MergePackageFiles returns the union of existing and incoming leaf-name
-// lists. Used alongside MergeLocationFiles for incremental adds.
-// MergePackageFiles returns the union of existing and incoming leaf-name
-// lists. Used alongside MergeLocationFiles for incremental adds.
 func MergePackageFiles(existing, incoming InstalledFiles) InstalledFiles {
 	out := InstalledFiles{
-		Skills:   append([]string(nil), existing.Skills...),
-		Agents:   append([]string(nil), existing.Agents...),
-		Commands: append([]string(nil), existing.Commands...),
-		Hooks:    append([]string(nil), existing.Hooks...),
+		Skills:     append([]string(nil), existing.Skills...),
+		FlatSkills: append([]string(nil), existing.FlatSkills...),
+		Agents:     append([]string(nil), existing.Agents...),
+		Commands:   append([]string(nil), existing.Commands...),
+		Hooks:      append([]string(nil), existing.Hooks...),
+	}
+	for _, s := range incoming.FlatSkills {
+		if !slices.Contains(out.FlatSkills, s) {
+			out.FlatSkills = append(out.FlatSkills, s)
+		}
 	}
 	for _, s := range incoming.Skills {
 		if !slices.Contains(out.Skills, s) {

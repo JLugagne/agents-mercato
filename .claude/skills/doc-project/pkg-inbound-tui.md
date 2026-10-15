@@ -41,12 +41,28 @@ Follows the Elm architecture (Bubble Tea pattern): Model → Update → View.
 
 ```go
 type TUIServices struct {
-    EntryQueries
-    SearchQueries
-    ReadmeQueries
-    MarketQueries
+    Markets service.MarketCommands
+    Sync    service.SyncCommands
+    Entries service.EntryCommands
+    Search  service.SearchQueries
 }
 ```
+
+Keystrokes in search mode are debounced: each change bumps `searchSeq` and
+schedules a 150 ms `tea.Tick` carrying a `SearchTickMsg{Seq, Query}`; only the
+tick matching the latest `searchSeq` launches `searchCmd`. Esc clears
+`searchQuery` and bumps `searchSeq` so in-flight ticks/results are ignored.
+Searches can still overlap (debounce gap, market filter re-run), so
+`app.tokenize` takes a Snowball stemmer from a `sync.Pool` (a
+shared stemmer panics under concurrent use), and `SearchResultMsg` is dropped
+unless `msg.Query` matches the current `searchQuery`. Panel heights go through
+`panelHeight()` / `rightPanelHeights()`, which clamp at 0 for tiny terminals.
+
+`Update` never calls services synchronously. `loadAllMarkets` fetches the
+markets list alongside the index (`IndexReadyMsg.Markets` feeds
+`skillsOnlyMarkets`), and the market popup is filled by `listMarketsCmd` →
+`MarketsListedMsg` (`MarketPopup.setMarkets`). Rendered markdown and glamour
+renderers live in FIFO-bounded caches (`boundedCache`: 256 renders, 8 widths).
 
 ## Features
 

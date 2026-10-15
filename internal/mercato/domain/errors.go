@@ -70,6 +70,10 @@ var (
 	ErrConflictHookEventMatcher = &DomainError{Code: "CONFLICT_HOOK_EVENT_MATCHER", Message: "two markets provide hooks for the same (event, matcher) pair"}
 )
 
+// ErrUnknownTool is returned when a tool name given in config or --tools has
+// no registered transformer.
+var ErrUnknownTool = &DomainError{Code: "UNKNOWN_TOOL", Message: "unknown tool target"}
+
 var (
 	ErrInvalidHookSnippet     = &DomainError{Code: "INVALID_HOOK_SNIPPET", Message: "hook snippet must contain a non-empty 'event' string and a non-empty 'hooks' array"}
 	ErrSettingsHooksMalformed = &DomainError{Code: "SETTINGS_HOOKS_MALFORMED", Message: "settings.json 'hooks' key has unexpected shape; refusing to install"}

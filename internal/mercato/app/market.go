@@ -534,6 +534,11 @@ func (a *App) SetMarketProperty(name, key, value string) error {
 }
 
 func (a *App) SetConfigField(key, value string) error {
+	if tool, ok := strings.CutPrefix(key, "tools."); ok {
+		if err := a.checkToolName(tool); err != nil {
+			return err
+		}
+	}
 	return a.cfg.SetConfigField(a.configPath, key, value)
 }
 

@@ -1,107 +1,60 @@
-package transform
+package transform_test
 
 import (
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/transform"
 )
 
-func TestCursorTransformer(t *testing.T) {
-	tr := &CursorTransformer{}
+func TestCursor(t *testing.T) {
+	tr := transform.CursorTransformer{}
+	require.Equal(t, "cursor", tr.ToolName())
+	require.Equal(t, []string{".cursor", ".cursorrules"}, tr.Detect())
 
-	t.Run("ToolName", func(t *testing.T) {
-		if got := tr.ToolName(); got != "cursor" {
-			t.Errorf("ToolName() = %q, want %q", got, "cursor")
+	t.Run("native skill and agent", func(t *testing.T) {
+		for _, typ := range []domain.EntryType{domain.EntryTypeSkill, domain.EntryTypeAgent} {
+			res := tr.Transform(f2Input(typ, "d/x/y.md", f2Skill))
+			require.False(t, res.Skipped)
+			require.Equal(t, "cursor", res.ToolName)
+			require.Empty(t, res.Files)
+			require.Empty(t, res.Warnings)
 		}
 	})
 
-	t.Run("SupportsEntry", func(t *testing.T) {
-		if tr.SupportsEntry(domain.EntryTypeAgent) {
-			t.Error("should not support agents")
-		}
-		if !tr.SupportsEntry(domain.EntryTypeSkill) {
-			t.Error("should support skills")
-		}
+	t.Run("command becomes skill", func(t *testing.T) {
+		res := tr.Transform(f2Input(domain.EntryTypeCommand, "d/commands/fix.md", f2Command))
+		require.Equal(t, ".cursor/skills/fix/SKILL.md", res.Files[0].Path)
+		fm := f2Frontmatter(t, res.Files[0].Content)
+		require.Equal(t, "fix", fm["name"])
+		require.Equal(t, true, fm["disable-model-invocation"])
 	})
 
-	t.Run("OutputPath", func(t *testing.T) {
-		entry := domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill}
-		want := ".cursor/rules/my-skill.mdc"
-		if got := tr.OutputPath(entry); got != want {
-			t.Errorf("OutputPath() = %q, want %q", got, want)
-		}
+	t.Run("hook", func(t *testing.T) {
+		res := tr.Transform(f2Hook("UserPromptSubmit", "Bash", "12"))
+		require.Len(t, res.Hooks, 1)
+		p := res.Hooks[0]
+		require.Equal(t, ".cursor/hooks.json", p.File)
+		require.Equal(t, []string{"hooks"}, p.Keys)
+		require.Equal(t, "beforeSubmitPrompt", p.Event)
+		require.Equal(t, map[string]any{"version": 1}, p.Header)
+		require.JSONEq(t, `{"type":"command","command":"go vet ./...","timeout":12,"matcher":"Bash"}`, string(p.Entry))
 	})
 
-	t.Run("Transform", func(t *testing.T) {
-		tests := []struct {
-			name       string
-			entry      domain.Entry
-			content    string
-			wantSkip   bool
-			wantReason string
-			checkBody  func(t *testing.T, result domain.TransformResult)
-		}{
-			{
-				name:       "agent is skipped",
-				entry:      domain.Entry{Filename: "my-agent.md", Type: domain.EntryTypeAgent},
-				content:    "---\ndescription: test\n---\nBody",
-				wantSkip:   true,
-				wantReason: "cursor does not support agents",
-			},
-			{
-				name:    "skill with all fields",
-				entry:   domain.Entry{Filename: "my-skill", Type: domain.EntryTypeSkill},
-				content: "---\ndescription: A great skill\nauthor: me\nmct_ref: foo@bar\nmodel: claude-sonnet\n---\nSkill body here",
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if !strings.Contains(content, "alwaysApply: false") {
-						t.Error("missing alwaysApply: false")
-					}
-					if !strings.Contains(content, "description: A great skill") {
-						t.Error("missing description")
-					}
-					if !strings.Contains(content, "Skill body here") {
-						t.Error("missing body")
-					}
-					if strings.Contains(content, "mct_ref") {
-						t.Error("should not contain mct_ref")
-					}
-					if strings.Contains(content, "author") {
-						t.Error("should not contain author")
-					}
-				},
-			},
-			{
-				name:    "skill with no frontmatter",
-				entry:   domain.Entry{Filename: "plain", Type: domain.EntryTypeSkill},
-				content: "Just plain content",
-				checkBody: func(t *testing.T, result domain.TransformResult) {
-					t.Helper()
-					content := string(result.Content)
-					if !strings.Contains(content, "alwaysApply: false") {
-						t.Error("missing alwaysApply field")
-					}
-					if !strings.Contains(content, "Just plain content") {
-						t.Error("missing body")
-					}
-				},
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				result := tr.Transform(tt.entry, []byte(tt.content), domain.ToolMapping{})
-				if result.Skipped != tt.wantSkip {
-					t.Errorf("Skipped = %v, want %v", result.Skipped, tt.wantSkip)
-				}
-				if tt.wantReason != "" && result.SkipReason != tt.wantReason {
-					t.Errorf("SkipReason = %q, want %q", result.SkipReason, tt.wantReason)
-				}
-				if tt.checkBody != nil {
-					tt.checkBody(t, result)
-				}
-			})
-		}
+	t.Run("one patch per handler", func(t *testing.T) {
+		in := f2Input(domain.EntryTypeHook, "d/hooks/h.json", `{"event":"Stop","hooks":[{"type":"command","command":"a"},{"type":"command","command":"b"},{"type":"prompt"}]}`)
+		res := tr.Transform(in)
+		require.Len(t, res.Hooks, 2)
+		require.Equal(t, "stop", res.Hooks[1].Event)
+		require.JSONEq(t, `{"type":"command","command":"b"}`, string(res.Hooks[1].Entry))
+		require.NotEmpty(t, res.Warnings)
+	})
+
+	t.Run("notification has no equivalent", func(t *testing.T) {
+		res := tr.Transform(f2Hook("Notification", "", ""))
+		require.True(t, res.Skipped)
+		require.Empty(t, res.Hooks)
 	})
 }

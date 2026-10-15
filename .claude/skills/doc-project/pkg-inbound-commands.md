@@ -61,6 +61,7 @@ type Services struct {
 | `sync_state_cmd.go` | `sync-state` | — | Per-market sync state |
 | `index_cmd.go` | `index dump`, `index bench` | — | Index debugging |
 | `doctor_cmd.go` | `doctor` | — | Read-only health audit (drift, locally-deleted, stale locations, upstream-removed, orphans) |
+| `migrate_cmd.go` | `migrate` | `--dry-run`, `--all-locations`, `--json` | Convert files from older mct layouts (also run automatically by `update`/`sync`); `update`/`sync` print migration `Details` |
 | `restore_prompt.go` | (helper) | — | Per-file `[r]estore / [k]eep / [a]ll / [n]one` prompt used by `sync` between Refresh and Update |
 
 ## Utility Files

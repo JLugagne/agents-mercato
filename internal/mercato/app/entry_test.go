@@ -923,7 +923,7 @@ func TestPrune_AllKeep(t *testing.T) {
 
 	git := &gitrepotest.MockGitRepo{
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
-			return "", errors.New("file gone from registry")
+			return "", gitrepo.ErrFileNotFound
 		},
 	}
 
@@ -972,7 +972,7 @@ func TestPrune_AllRemove(t *testing.T) {
 
 	git := &gitrepotest.MockGitRepo{
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
-			return "", errors.New("file gone from registry")
+			return "", gitrepo.ErrFileNotFound
 		},
 	}
 

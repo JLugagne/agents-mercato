@@ -44,8 +44,15 @@ func TestIntegration_AddHook(t *testing.T) {
 	if !strings.Contains(settings, "go vet") {
 		t.Errorf("expected hook command in settings.json:\n%s", settings)
 	}
-	if !strings.Contains(settings, "mct_id") {
-		t.Errorf("expected mct_id injected in settings.json:\n%s", settings)
+	if strings.Contains(settings, "mct_id") {
+		t.Errorf("settings.json must not carry mct_id (schema rejects unknown keys):\n%s", settings)
+	}
+	owners, err := os.ReadFile(filepath.Join(projectDir, ".claude", "mct-hooks.json"))
+	if err != nil {
+		t.Fatalf("read mct-hooks.json: %v", err)
+	}
+	if !strings.Contains(string(owners), mctIDForRef(ref)) {
+		t.Errorf("expected ownership recorded in mct-hooks.json:\n%s", owners)
 	}
 
 	db, err := cfgadapter.NewInstallDB().Load(app.cacheDir)

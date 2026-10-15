@@ -1,6 +1,6 @@
 # Creating a Market
 
-A market is a Git repository with a specific directory structure. `mct` indexes it to let users discover, install, and update agent, skill, slash command, and Claude Code hook definitions — and to **transform** them into the native format of any supported AI coding tool (Claude Code, Cursor, Windsurf, Codex, Gemini, OpenCode, Copilot, Continue, Supermaven, PearAI, RooCode).
+A market is a Git repository with a specific directory structure. `mct` indexes it to let users discover, install, and update agent, skill, slash command, and Claude Code hook definitions — and to **transform** them into the native format of any supported AI coding tool (Claude Code, Codex, Cursor, Copilot, Gemini, OpenCode, pi, Kilo, Factory, Qwen, Kiro, Windsurf, Junie, Vibe, Antigravity and more — see the README).
 
 `mct` supports two repository formats: the **mct market format** (hierarchical, with profiles) and the **skills-only format** (flat, for pure skill collections). When you register a repository, `mct` auto-detects which format it uses.
 
@@ -321,78 +321,42 @@ When a user runs `mct add`, the entry is converted into the native format of eve
 
 ### Output paths and capabilities
 
-| Tool       | Agents | Skills | Commands | Hooks | Output path                                                       |
-| ---------- | :----: | :----: | :------: | :---: | ----------------------------------------------------------------- |
-| Claude     |   ✓    |   ✓    |    ✓     |   ✓   | `.claude/agents/<name>.md`, `.claude/skills/<name>/SKILL.md`, `.claude/commands/<name>.md`, merged into `.claude/settings.json` |
-| Cursor     |        |   ✓    |          |       | `.cursor/rules/<name>.mdc`                                        |
-| Windsurf   |        |   ✓    |          |       | `.windsurf/rules/<name>.md`                                       |
-| Codex      |        |   ✓    |          |       | `.codex/skills/<name>/SKILL.md`                                   |
-| Gemini     |        |   ✓    |          |       | `.gemini/rules/<name>.md`                                         |
-| OpenCode   |   ✓    |   ✓    |          |       | `.opencode/agents/<name>.md`, `.opencode/skills/<name>/SKILL.md`  |
-| Copilot    |        |   ✓    |          |       | `.github/copilot-instructions.md`                                 |
-| Continue   |        |   ✓    |          |       | `.continue/rules/<name>.md`                                       |
-| Supermaven |        |   ✓    |          |       | `.supermavenrules`                                                |
-| PearAI     |        |   ✓    |          |       | `.peairules`                                                      |
-| RooCode    |        |   ✓    |          |       | `.roocode.rules`                                                  |
+The full per-tool matrix (skills, agents, commands, hooks and their output paths) is in the [README](./README.md#supported-tools). A tool is only written to when its marker directory exists in the project (e.g. `.codex/`, `.opencode/`). Skills read by several tools go once to the cross-tool `.agents/skills/<name>/` directory, supporting files included; tools that read `.claude/skills/` natively get nothing extra.
 
-Tools that don't support agents skip agent entries with a warning (e.g. installing an agent with `tools.cursor` enabled produces a `cursor does not support agents` warning). Commands and hooks are Claude-Code-specific and are silently skipped by every other tool.
+### What market authors should know
 
-### Frontmatter conversion
+- **Write entries in Claude Code format.** `mct` converts them; the body is preserved as-is.
+- **Skill names** are normalized to the Agent Skills rules (lowercase `a-z0-9-`, max 64 chars) for other tools; keep directory names compliant to avoid surprises.
+- **Agents**: `model` (`sonnet`, `opus`, `haiku`, `inherit` or a full id) and `tools` (comma string or list of Claude tool names) are mapped per tool; unmappable values are dropped with a warning. Tools without subagents (pi, Windsurf, Zed, …) skip agents.
+- **Commands**: `$ARGUMENTS` is rewritten where the tool uses another placeholder (`{{args}}` for Gemini/Qwen, `$prompt` for Junie). Tools that dropped custom commands receive a user-invocable skill instead.
+- **Hooks**: events and matchers are mapped per tool (e.g. `PreToolUse` → `BeforeTool` for Gemini); events with no equivalent are skipped with a warning. OpenCode, Kilo and pi get a generated TypeScript plugin that runs the hook command.
 
-Each transformer rewrites the YAML frontmatter to match the conventions of its target tool. For example:
+### Tool mappings (`tool-mappings.yml`)
 
-- **Claude** — passes content through unchanged (canonical format).
-- **Cursor** — emits `alwaysApply: false` and `description: <desc>` in the `.mdc` file.
-- **Windsurf / Gemini / Continue** — emit a tool-specific frontmatter block with the description.
-- **Copilot / Supermaven / PearAI / RooCode** — concatenate body content into a single rules file (no frontmatter).
-
-The body of the entry is preserved as-is in all cases — you write your prompt once, and `mct` only adapts the wrapper.
-
-### Tool mappings (`tool_mappings.yml`)
-
-Some entries reference Claude-specific model names (`opus`, `sonnet`, `haiku`) or built-in tool names (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`). When emitting to a different tool, `mct` rewrites these via mappings stored in `~/.config/mct/tool_mappings.yml`:
+Per-tool defaults for model and tool names live in `mct`. `~/.config/mct/tool-mappings.yml` only holds user overrides; an empty value drops the field:
 
 ```yaml
 models:
   sonnet:
-    opencode: anthropic/claude-sonnet-4-20250514
-    cursor: ""
-    windsurf: ""
+    opencode: anthropic/claude-sonnet-5-5
+    codex: ""
 tools:
   Bash:
-    opencode: bash
-  Read:
-    opencode: read
-  Edit:
-    opencode: edit
+    gemini: run_shell_command
 ```
-
-The defaults cover OpenCode and leave most other tools blank (no rewrite). Edit `tool_mappings.yml` directly to add custom mappings — for example, to map `Bash` to your team's preferred command name in another tool.
 
 ### Per-tool output result
 
 `mct add` reports which tool wrote which file:
 
 ```
-ok  installed acme/agents/dev/go/skills/go-test
-ok  claude    .claude/skills/go-test/SKILL.md
-ok  cursor    .cursor/rules/go-test.mdc
-ok  windsurf  .windsurf/rules/go-test.md
+ok  installed acme@dev/go/agents/reviewer.md
+ok  claude    .claude/agents/reviewer.md
+ok  codex     .codex/agents/reviewer.toml
+ok  opencode  .opencode/agents/reviewer.md
 ```
 
-In `--json` mode the same information is returned under `tool_writes`:
-
-```json
-{
-  "ref": "acme/agents/dev/go/skills/go-test",
-  "status": "installed",
-  "tool_writes": {
-    "claude": ".claude/skills/go-test/SKILL.md",
-    "cursor": ".cursor/rules/go-test.mdc",
-    "windsurf": ".windsurf/rules/go-test.md"
-  }
-}
-```
+In `--json` mode the same information is returned under `tool_writes`.
 
 ### Installation as a copy
 

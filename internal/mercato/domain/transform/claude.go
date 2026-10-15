@@ -1,36 +1,16 @@
 package transform
 
-import (
-	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
-)
+import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
 
-// ClaudeTransformer passes content through unchanged.
+// ClaudeTransformer is the identity target. Claude Code files are written by
+// the app's core install path, so it produces nothing here; it is registered
+// so that "claude" is a valid tool name.
 type ClaudeTransformer struct{}
 
-func (t *ClaudeTransformer) ToolName() string { return "claude" }
+func (ClaudeTransformer) ToolName() string { return "claude" }
 
-func (t *ClaudeTransformer) SupportsEntry(_ domain.EntryType) bool { return true }
+func (ClaudeTransformer) Detect() []string { return nil }
 
-func (t *ClaudeTransformer) OutputPath(entry domain.Entry) string {
-	name := entryName(entry)
-	if entry.Type == domain.EntryTypeAgent {
-		return ".claude/agents/" + name + ".md"
-	}
-	if entry.Type == domain.EntryTypeCommand {
-		return ".claude/commands/" + name + ".md"
-	}
-	if entry.Type == domain.EntryTypeHook {
-		// Hooks are merged into a single settings.json by the App layer;
-		// the path is reported here for traceability.
-		return ".claude/settings.json"
-	}
-	return ".claude/skills/" + name + "/SKILL.md"
-}
-
-func (t *ClaudeTransformer) Transform(entry domain.Entry, content []byte, _ domain.ToolMapping) domain.TransformResult {
-	return domain.TransformResult{
-		ToolName:   t.ToolName(),
-		Content:    content,
-		OutputPath: t.OutputPath(entry),
-	}
+func (ClaudeTransformer) Transform(domain.TransformInput) domain.TransformResult {
+	return domain.TransformResult{ToolName: "claude"}
 }

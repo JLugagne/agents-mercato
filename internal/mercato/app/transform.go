@@ -1,7 +1,9 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -10,8 +12,6 @@ import (
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 )
 
-// loadEnabledTools loads the global config Tools map, merges with the project
-// .mct.yml override if present, and returns the final enabled-tools map.
 func (a *App) loadEnabledTools() map[string]bool {
 	cfg, err := a.cfg.Load(a.configPath)
 	if err != nil {
@@ -22,239 +22,374 @@ func (a *App) loadEnabledTools() map[string]bool {
 
 	projCfg, err := a.cfg.LoadProjectConfig(projectPath(cfg.LocalPath))
 	if err != nil {
-		// No project config or error reading it — use global only.
 		return globalTools
 	}
 
 	return domain.MergeTools(globalTools, projCfg.Tools)
 }
 
-// loadToolMappings loads tool mappings from the config dir, falling back to
-// defaults if the mapping store is not configured.
 func (a *App) loadToolMappings() domain.ToolMapping {
-	if a.toolMappings == nil {
-		return domain.ToolMapping{
-			Models: make(map[string]map[string]string),
-			Tools:  make(map[string]map[string]string),
-		}
+	empty := domain.ToolMapping{
+		Models: make(map[string]map[string]string),
+		Tools:  make(map[string]map[string]string),
 	}
-	mappingsPath := filepath.Join(filepath.Dir(a.configPath), "tool-mappings.yml")
-	m, err := a.toolMappings.LoadToolMappings(mappingsPath)
+	if a.toolMappings == nil {
+		return empty
+	}
+	m, err := a.toolMappings.LoadToolMappings(filepath.Join(filepath.Dir(a.configPath), "tool-mappings.yml"))
 	if err != nil {
-		return domain.ToolMapping{
-			Models: make(map[string]map[string]string),
-			Tools:  make(map[string]map[string]string),
-		}
+		return empty
 	}
 	return m
 }
 
-// toolWriteResult holds the full result of writing to tool targets.
 type toolWriteResult struct {
-	ToolWrites map[string]string                 // tool -> relative output path
-	ToolFiles  map[string][]domain.InstalledFile // tool -> files written (one per tool, but kept as a slice for symmetry)
+	ToolWrites map[string]string
+	ToolFiles  map[string][]domain.InstalledFile
 	Warnings   []string
 }
 
-// writeToToolTargets transforms and writes the entry content to all enabled
-// tool targets via the supplied writer. It returns per-tool file records
-// (path + xxhash) and warnings. The Claude tool is skipped here since it is
-// handled by the existing code path. If toolsOverride is non-nil, it is used
-// instead of the config-based tools.
-func (a *App) writeToToolTargets(w txWriter, entry domain.Entry, content []byte, projectDir string, toolsOverride map[string]bool) toolWriteResult {
-	enabledTools := toolsOverride
-	if enabledTools == nil {
-		enabledTools = a.loadEnabledTools()
+func (r *toolWriteResult) merge(o toolWriteResult) {
+	if r.ToolWrites == nil {
+		r.ToolWrites = map[string]string{}
 	}
-	if len(enabledTools) == 0 {
-		return toolWriteResult{}
+	if r.ToolFiles == nil {
+		r.ToolFiles = map[string][]domain.InstalledFile{}
 	}
+	for k, v := range o.ToolWrites {
+		if _, ok := r.ToolWrites[k]; !ok {
+			r.ToolWrites[k] = v
+		}
+	}
+	for k, v := range o.ToolFiles {
+		r.ToolFiles[k] = append(r.ToolFiles[k], v...)
+	}
+	r.Warnings = append(r.Warnings, o.Warnings...)
+}
 
-	transformers := a.transformers.EnabledTransformers(enabledTools)
+func (a *App) checkToolName(tool string) error {
+	if len(a.transformers) == 0 {
+		return nil
+	}
+	if _, ok := a.transformers.Get(tool); !ok {
+		return errors.Join(domain.ErrUnknownTool, fmt.Errorf("%q (supported: %s)", tool, strings.Join(a.transformers.Names(), ", ")))
+	}
+	return nil
+}
+
+func (a *App) projectExists(projectDir string) func(string) bool {
+	return func(rel string) bool {
+		_, err := a.fs.Stat(filepath.Join(projectDir, filepath.FromSlash(rel)))
+		return err == nil
+	}
+}
+
+func toolDetected(t domain.Transformer, exists func(string) bool) bool {
+	markers := t.Detect()
+	if len(markers) == 0 {
+		return true
+	}
+	for _, m := range markers {
+		if exists(m) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) enabledToolTransformers(toolsOverride map[string]bool) []domain.Transformer {
+	enabled := toolsOverride
+	if enabled == nil {
+		enabled = a.loadEnabledTools()
+	}
+	var out []domain.Transformer
+	for _, t := range a.transformers.EnabledTransformers(enabled) {
+		if t.ToolName() != "claude" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func (a *App) writeToToolTargets(w txWriter, entry domain.Entry, content []byte, assets []domain.TransformAsset, projectDir string, toolsOverride map[string]bool) toolWriteResult {
+	return a.writeToolTargets(w, entry, content, assets, projectDir, toolsOverride, nil)
+}
+
+func (a *App) writeToolTargets(w txWriter, entry domain.Entry, content []byte, assets []domain.TransformAsset, projectDir string, toolsOverride map[string]bool, skip func(string) bool) toolWriteResult {
+	transformers := a.enabledToolTransformers(toolsOverride)
+	res := toolWriteResult{ToolWrites: map[string]string{}, ToolFiles: map[string][]domain.InstalledFile{}}
 	if len(transformers) == 0 {
-		return toolWriteResult{}
+		return res
 	}
 
 	mappings := a.loadToolMappings()
-
-	toolWrites := make(map[string]string)
-	toolFiles := make(map[string][]domain.InstalledFile)
-	var warnings []string
+	exists := a.projectExists(projectDir)
+	shared := map[string]bool{}
 
 	for _, t := range transformers {
 		toolName := t.ToolName()
-
-		// Skip claude — it's handled by the existing code path.
-		if toolName == "claude" {
+		if !toolDetected(t, exists) {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: skipped (%s does not exist in project)", toolName, strings.Join(t.Detect(), " or ")))
 			continue
 		}
-
-		if !t.SupportsEntry(entry.Type) {
-			warnings = append(warnings, fmt.Sprintf("%s: skipped (does not support %ss)", toolName, entry.Type))
-			continue
-		}
-
-		result := t.Transform(entry, content, mappings)
-		if result.Skipped {
-			reason := result.SkipReason
+		out := t.Transform(domain.TransformInput{Entry: entry, Content: content, Assets: assets, Mappings: mappings, Exists: exists})
+		if out.Skipped {
+			reason := out.SkipReason
 			if reason == "" {
 				reason = "skipped"
 			}
-			warnings = append(warnings, fmt.Sprintf("%s: %s", toolName, reason))
+			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: skipped (%s)", toolName, reason))
 			continue
 		}
+		res.Warnings = append(res.Warnings, out.Warnings...)
 
-		outPath := filepath.Join(projectDir, result.OutputPath)
-
-		// Check if the parent dot-directory exists (e.g. .cursor/, .windsurf/).
-		// If not, skip silently with a warning.
-		dotDir := toolDotDir(result.OutputPath)
-		if dotDir != "" {
-			dotDirAbs := filepath.Join(projectDir, dotDir)
-			if _, err := a.fs.Stat(dotDirAbs); err != nil {
-				warnings = append(warnings, fmt.Sprintf("%s: skipped (%s does not exist)", toolName, dotDir))
+		for _, f := range out.Files {
+			if skip != nil && skip(f.Path) {
 				continue
 			}
-		}
-
-		if err := w.WriteFile(outPath, result.Content); err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: write error: %v", toolName, err))
-			continue
-		}
-
-		toolWrites[toolName] = result.OutputPath
-		toolFiles[toolName] = append(toolFiles[toolName], domain.InstalledFile{
-			Path: filepath.ToSlash(result.OutputPath),
-			XXH:  xxhashHex(result.Content),
-		})
-		warnings = append(warnings, result.Warnings...)
-	}
-
-	return toolWriteResult{
-		ToolWrites: toolWrites,
-		ToolFiles:  toolFiles,
-		Warnings:   warnings,
-	}
-}
-
-// toolRemoveResult holds the result of removing tool-specific files.
-type toolRemoveResult struct {
-	Removed []string // tool names successfully removed from
-	Errors  []error
-}
-
-// removeFromToolTargets removes tool-specific files for the given entry from
-// all enabled tool directories.
-// removeFromToolTargets removes tool-specific files for the given entry from
-// all enabled tool directories via the supplied writer.
-func (a *App) removeFromToolTargets(w txWriter, entry domain.Entry, projectDir string) toolRemoveResult {
-	enabledTools := a.loadEnabledTools()
-	if len(enabledTools) == 0 {
-		return toolRemoveResult{}
-	}
-
-	transformers := a.transformers.EnabledTransformers(enabledTools)
-	var result toolRemoveResult
-
-	for _, t := range transformers {
-		if t.ToolName() == "claude" {
-			continue
-		}
-		if !t.SupportsEntry(entry.Type) {
-			continue
-		}
-
-		outPath := filepath.Join(projectDir, t.OutputPath(entry))
-		if err := w.DeleteFile(outPath); err != nil {
-			// Ignore file-not-found type errors.
-			if !strings.Contains(err.Error(), "no such file") && !strings.Contains(err.Error(), "not exist") {
-				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", t.ToolName(), err))
+			owner := toolName
+			if f.IsShared() {
+				owner = domain.RuntimeTypeSharedAgents
+				if shared[f.Path] {
+					continue
+				}
+				shared[f.Path] = true
 			}
-		} else {
-			result.Removed = append(result.Removed, t.ToolName())
+			if err := w.WriteFile(filepath.Join(projectDir, filepath.FromSlash(f.Path)), f.Content); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: write %s: %v", toolName, f.Path, err))
+				continue
+			}
+			res.ToolFiles[owner] = append(res.ToolFiles[owner], domain.InstalledFile{Path: f.Path, XXH: xxhashHex(f.Content), Source: entry.RelPath})
+			if _, ok := res.ToolWrites[toolName]; !ok {
+				res.ToolWrites[toolName] = f.Path
+			}
+		}
+
+		for _, p := range out.Hooks {
+			data, err := applyHookPatch(w, projectDir, p)
+			if err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("%s: hook %s: %v", toolName, p.File, err))
+				continue
+			}
+			res.ToolFiles[toolName] = append(res.ToolFiles[toolName], domain.InstalledFile{Path: p.Anchor(), XXH: xxhashHex(data), Source: entry.RelPath, Data: data})
+			if _, ok := res.ToolWrites[toolName]; !ok {
+				res.ToolWrites[toolName] = p.File
+			}
 		}
 	}
-	return result
+	return res
 }
 
-// xxhashHex returns the hex-encoded xxhash64 of data.
-func xxhashHex(data []byte) string {
-	return fmt.Sprintf("%016x", xxhash.Sum64(data))
-}
-
-// toolDotDir extracts the leading dot-directory from a path like ".cursor/rules/foo.mdc".
-// Returns "" if there is no leading dot-directory.
-func toolDotDir(relPath string) string {
-	parts := strings.SplitN(filepath.ToSlash(relPath), "/", 2)
-	if len(parts) > 0 && strings.HasPrefix(parts[0], ".") {
-		return parts[0]
+func recordToolFiles(db *domain.InstallDatabase, market, profile, headSHA string, pkgFiles domain.InstalledFiles, projectPath string, twr toolWriteResult) {
+	for _, toolName := range sortedKeys(twr.ToolFiles) {
+		merged := twr.ToolFiles[toolName]
+		if pkg := db.FindPackage(market, profile); pkg != nil {
+			if loc := findLocationByPathAndType(pkg, projectPath, toolName); loc != nil {
+				merged = domain.MergeLocationFiles(loc.Files, merged)
+			}
+		}
+		db.AddOrUpdatePackage(market, profile, headSHA, pkgFiles, domain.InstalledLocation{
+			Path:  projectPath,
+			Type:  toolName,
+			Files: merged,
+		})
 	}
-	return ""
 }
 
-// detectToolDrift compares per-tool files at a project location against their
-// recorded xxhash. Returns a map of toolName → EntryState. Reads from the
-// per-location InstalledFile entries (not the legacy ToolChecksums map).
-func (a *App) detectToolDrift(entry domain.Entry, pkg domain.InstalledPackage, projectDir string) map[string]domain.EntryState {
-	enabledTools := a.loadEnabledTools()
-	if len(enabledTools) == 0 {
+func isToolLocation(loc domain.InstalledLocation, projectDir string) bool {
+	return loc.Path == projectDir && loc.Type != domain.RuntimeTypeClaudeCode
+}
+
+func removeToolRecord(w txWriter, projectDir string, f domain.InstalledFile) error {
+	if f.IsHookPatch() {
+		if len(f.Data) == 0 {
+			return nil
+		}
+		return removeHookPatch(w, projectDir, f.Path, f.Data)
+	}
+	abs := filepath.Join(projectDir, filepath.FromSlash(f.Path))
+	if dir, ok := toolSkillDir(f.Path); ok {
+		abs = filepath.Join(projectDir, filepath.FromSlash(dir))
+		if err := w.DeleteAll(abs); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		return nil
 	}
+	if err := w.DeleteFile(abs); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
 
-	transformers := a.transformers.EnabledTransformers(enabledTools)
-	states := make(map[string]domain.EntryState)
-
-	for _, t := range transformers {
-		toolName := t.ToolName()
-		if toolName == "claude" {
-			continue
-		}
-		if !t.SupportsEntry(entry.Type) {
-			continue
-		}
-
-		// Look up the location entry for (projectDir, toolName).
-		var loc *domain.InstalledLocation
-		for i := range pkg.Locations {
-			if pkg.Locations[i].Path == projectDir && pkg.Locations[i].Type == toolName {
-				loc = &pkg.Locations[i]
-				break
-			}
-		}
-		if loc == nil || len(loc.Files) == 0 {
-			continue
-		}
-
-		expectedPath := filepath.ToSlash(t.OutputPath(entry))
-		var expectedXXH string
-		found := false
-		for _, f := range loc.Files {
-			if f.Path == expectedPath {
-				expectedXXH = f.XXH
-				found = true
-				break
-			}
-		}
-		if !found {
-			continue
-		}
-
-		outPath := filepath.Join(projectDir, t.OutputPath(entry))
-		localContent, err := a.fs.ReadFile(outPath)
-		if err != nil {
-			states[toolName] = domain.StateDrift
-			continue
-		}
-
-		if xxhashHex(localContent) != expectedXXH {
-			states[toolName] = domain.StateDrift
-		} else {
-			states[toolName] = domain.StateClean
+func toolSkillDir(rel string) (string, bool) {
+	parts := strings.Split(rel, "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == "skills" && strings.HasPrefix(parts[0], ".") {
+			return strings.Join(parts[:i+2], "/"), true
 		}
 	}
+	return "", false
+}
 
+func removeToolFiles(w txWriter, pkg *domain.InstalledPackage, projectDir, source string) ([]string, error) {
+	var removedTools []string
+	var errs []error
+	kept := pkg.Locations[:0]
+	for _, loc := range pkg.Locations {
+		if !isToolLocation(loc, projectDir) {
+			kept = append(kept, loc)
+			continue
+		}
+		var remaining []domain.InstalledFile
+		removed := false
+		for _, f := range loc.Files {
+			if source != "" && f.Source != source {
+				remaining = append(remaining, f)
+				continue
+			}
+			if err := removeToolRecord(w, projectDir, f); err != nil {
+				errs = append(errs, errors.Join(fmt.Errorf("%s: %s", loc.Type, f.Path), err))
+				remaining = append(remaining, f)
+				continue
+			}
+			removed = true
+		}
+		if removed && loc.Type != domain.RuntimeTypeSharedAgents {
+			removedTools = append(removedTools, loc.Type)
+		}
+		if len(remaining) > 0 {
+			loc.Files = remaining
+			kept = append(kept, loc)
+		}
+	}
+	pkg.Locations = kept
+	return removedTools, errors.Join(errs...)
+}
+
+func syncToolFiles(w txWriter, pkg *domain.InstalledPackage, projectDir string, fresh map[string][]domain.InstalledFile) []string {
+	var warnings []string
+	keep := map[string]bool{}
+	for _, files := range fresh {
+		for _, f := range files {
+			keep[toolRecordKey(f)] = true
+		}
+	}
+	var kept []domain.InstalledLocation
+	for _, loc := range pkg.Locations {
+		if !isToolLocation(loc, projectDir) {
+			kept = append(kept, loc)
+			continue
+		}
+		for _, f := range loc.Files {
+			if keep[toolRecordKey(f)] {
+				continue
+			}
+			if modifiedLocally(w, projectDir, f) {
+				warnings = append(warnings, fmt.Sprintf("%s: %s is no longer managed by mct but was modified locally, kept", loc.Type, f.Path))
+				continue
+			}
+			if err := removeToolRecord(w, projectDir, f); err != nil {
+				warnings = append(warnings, fmt.Sprintf("%s: remove %s: %v", loc.Type, f.Path, err))
+			}
+		}
+	}
+	for _, toolName := range sortedKeys(fresh) {
+		if len(fresh[toolName]) == 0 {
+			continue
+		}
+		kept = append(kept, domain.InstalledLocation{Path: projectDir, Type: toolName, Files: fresh[toolName]})
+	}
+	pkg.Locations = kept
+	return warnings
+}
+
+func modifiedLocally(w txWriter, projectDir string, f domain.InstalledFile) bool {
+	if f.IsHookPatch() {
+		return false
+	}
+	data, err := w.ReadFile(filepath.Join(projectDir, filepath.FromSlash(f.Path)))
+	return err == nil && xxhashHex(data) != f.XXH
+}
+
+func toolRecordKey(f domain.InstalledFile) string {
+	if f.IsHookPatch() {
+		return f.Path + "\x00" + f.XXH
+	}
+	return f.Path
+}
+
+func (a *App) detectToolDrift(entry domain.Entry, pkg domain.InstalledPackage, projectDir string) map[string]domain.EntryState {
+	states := make(map[string]domain.EntryState)
+	for _, loc := range pkg.Locations {
+		if !isToolLocation(loc, projectDir) {
+			continue
+		}
+		bySource := false
+		for _, f := range loc.Files {
+			if f.Source != "" {
+				bySource = true
+				break
+			}
+		}
+		for _, f := range loc.Files {
+			if bySource && f.Source != entry.RelPath {
+				continue
+			}
+			state := a.toolRecordState(projectDir, f)
+			if prev, ok := states[loc.Type]; !ok || prev == domain.StateClean {
+				states[loc.Type] = state
+			}
+		}
+	}
 	if len(states) == 0 {
 		return nil
 	}
 	return states
+}
+
+func (a *App) toolRecordState(projectDir string, f domain.InstalledFile) domain.EntryState {
+	if f.IsHookPatch() {
+		present, err := hookPatchPresent(a.fs.ReadFile, projectDir, f.Path, f.Data)
+		if err != nil || !present {
+			return domain.StateDrift
+		}
+		return domain.StateClean
+	}
+	data, err := a.fs.ReadFile(filepath.Join(projectDir, filepath.FromSlash(f.Path)))
+	if err != nil || xxhashHex(data) != f.XXH {
+		return domain.StateDrift
+	}
+	return domain.StateClean
+}
+
+func (a *App) skillAssets(clonePath, branch, relPath string) []domain.TransformAsset {
+	return a.skillAssetsAt(clonePath, branch, relPath, "HEAD")
+}
+
+func (a *App) skillAssetsAt(clonePath, branch, relPath, ref string) []domain.TransformAsset {
+	if !isDirBasedSkill(relPath) {
+		return nil
+	}
+	dir := filepath.ToSlash(filepath.Dir(relPath))
+	files, err := a.git.ListDirFiles(clonePath, branch, dir)
+	if err != nil {
+		return nil
+	}
+	var assets []domain.TransformAsset
+	for _, f := range files {
+		rel := strings.TrimPrefix(filepath.ToSlash(f), dir+"/")
+		if rel == "SKILL.md" || rel == f {
+			continue
+		}
+		content, err := a.git.ReadFileAtRef(clonePath, branch, f, ref)
+		if err != nil {
+			continue
+		}
+		assets = append(assets, domain.TransformAsset{Path: rel, Content: content})
+	}
+	return assets
+}
+
+func xxhashHex(data []byte) string {
+	return fmt.Sprintf("%016x", xxhash.Sum64(data))
 }

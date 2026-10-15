@@ -1,6 +1,15 @@
 package gitrepo
 
-import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
+import (
+	"errors"
+
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
+)
+
+// ErrFileNotFound is returned when a path does not exist in the tree at the
+// requested revision. Callers rely on it to tell an upstream removal apart
+// from a transient git failure before deleting anything locally.
+var ErrFileNotFound = errors.New("file not found in repository tree")
 
 // MarketFile holds a file's content and version, as read from a market repo in a single pass.
 type MarketFile struct {
@@ -15,6 +24,9 @@ type GitRepo interface {
 	Fetch(clonePath, branch string) (newHeadSHA string, err error)
 	DiffSinceCommit(clonePath, branch, oldSHA string) ([]domain.FileDiff, error)
 	ReadFileAtRef(clonePath, branch, filePath, commitSHA string) ([]byte, error)
+	// FileVersion returns the version of the last commit reachable from HEAD
+	// that touched filePath. It returns ErrFileNotFound when the file is absent
+	// from HEAD. On shallow clones the walk stops at the shallow boundary.
 	FileVersion(clonePath, filePath string) (domain.MctVersion, error)
 	RemoteHEAD(clonePath, branch string) (string, error)
 	ListFiles(clonePath, branch string) ([]string, error)

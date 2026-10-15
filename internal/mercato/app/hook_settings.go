@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -220,43 +221,6 @@ func marshalSortedMap(m map[string][]json.RawMessage) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// injectMctID inserts (or replaces) the "mct_id" field on every object inside
-// the snippet's hooks[] array, returning the rewritten hook objects.
-// Each returned object also carries the matcher field if the snippet
-// declared one (per Claude Code schema, hooks objects are not implicitly
-// scoped by their parent snippet).
-func injectMctID(snippet domain.HookSnippet, mctID string) ([]json.RawMessage, error) {
-	out := make([]json.RawMessage, 0, len(snippet.Hooks))
-	for _, raw := range snippet.Hooks {
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		var obj map[string]json.RawMessage
-		if err := dec.Decode(&obj); err != nil {
-			return nil, err
-		}
-		idBytes, err := json.Marshal(mctID)
-		if err != nil {
-			return nil, err
-		}
-		obj["mct_id"] = idBytes
-		if snippet.Matcher != "" {
-			if _, has := obj["matcher"]; !has {
-				mb, err := json.Marshal(snippet.Matcher)
-				if err != nil {
-					return nil, err
-				}
-				obj["matcher"] = mb
-			}
-		}
-		merged, err := marshalSortedObject(obj)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, merged)
-	}
-	return out, nil
-}
-
 func marshalSortedObject(obj map[string]json.RawMessage) ([]byte, error) {
 	keys := make([]string, 0, len(obj))
 	for k := range obj {
@@ -279,25 +243,6 @@ func marshalSortedObject(obj map[string]json.RawMessage) ([]byte, error) {
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
-}
-
-// extractMctID returns the mct_id string from a hook object, or "" if absent.
-func extractMctID(hook json.RawMessage) string {
-	var probe struct {
-		MctID string `json:"mct_id"`
-	}
-	_ = json.Unmarshal(hook, &probe)
-	return probe.MctID
-}
-
-// extractEventMatcher returns the matcher field of a hook object (or "").
-// Used by conflict detection.
-func extractMatcher(hook json.RawMessage) string {
-	var probe struct {
-		Matcher string `json:"matcher"`
-	}
-	_ = json.Unmarshal(hook, &probe)
-	return probe.Matcher
 }
 
 // projectRelFromClaude turns an absolute path under a project's .claude/
@@ -327,6 +272,9 @@ func projectRelFromClaude(abs string) string {
 // hookFileRepoPathStandalone is a non-method version of (*App).hookFileRepoPath
 // for use from helpers (drift detection, sync) that don't carry an *App.
 func hookFileRepoPathStandalone(profile, file string) string {
+	if profile == "hooks/"+file || strings.HasSuffix(profile, "/hooks/"+file) {
+		return profile
+	}
 	if profile != "" {
 		return profile + "/hooks/" + file
 	}

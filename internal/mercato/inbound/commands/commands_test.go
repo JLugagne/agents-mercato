@@ -86,6 +86,7 @@ type stubSync struct {
 	syncFn           func(opts service.SyncOpts) ([]service.SyncResult, error)
 	detectDeletedFn  func(opts service.DetectDeletedOpts) ([]service.DeletedFile, error)
 	restoreDeletedFn func(files []service.DeletedFile, opts service.RestoreOpts) ([]service.RestoreResult, error)
+	migrateFn        func(opts service.MigrateOpts) ([]service.MigrateResult, error)
 }
 
 func (s *stubSync) Check(opts service.CheckOpts) ([]domain.EntryStatus, error) {
@@ -126,6 +127,13 @@ func (s *stubSync) Sync(opts service.SyncOpts) ([]service.SyncResult, error) {
 func (s *stubSync) DetectDeleted(opts service.DetectDeletedOpts) ([]service.DeletedFile, error) {
 	if s.detectDeletedFn != nil {
 		return s.detectDeletedFn(opts)
+	}
+	return nil, nil
+}
+
+func (s *stubSync) Migrate(opts service.MigrateOpts) ([]service.MigrateResult, error) {
+	if s.migrateFn != nil {
+		return s.migrateFn(opts)
 	}
 	return nil, nil
 }

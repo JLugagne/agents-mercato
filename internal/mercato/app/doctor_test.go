@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/configstore/configstoretest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/filesystem/filesystemtest"
+	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/gitrepo/gitrepotest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/repositories/statestore/statestoretest"
 	"github.com/JLugagne/agents-mercato/internal/mercato/domain/service"
@@ -39,7 +39,7 @@ func doctorEnv(
 		FileVersionFn: func(clonePath, filePath string) (domain.MctVersion, error) {
 			for _, suf := range upstreamMissingSuffix {
 				if hasSuffix(filePath, suf) {
-					return "", errors.New("not found")
+					return "", gitrepo.ErrFileNotFound
 				}
 			}
 			return "v", nil
@@ -76,7 +76,7 @@ func hasSuffix(s, suf string) bool {
 // locally-deleted file, and an upstream-removed file.
 func TestDoctor_ReportsAllCategories(t *testing.T) {
 	cfg, state, git, fsMock := doctorEnv(
-		[]string{"mkt"}, // "orphan-mkt" intentionally not in config
+		[]string{"mkt"},                      // "orphan-mkt" intentionally not in config
 		map[string]bool{"/proj/alive": true}, // /proj/dead is stale
 		func(name string) ([]byte, error) {
 			switch filepath.Base(name) {

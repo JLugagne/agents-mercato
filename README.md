@@ -138,8 +138,12 @@ go install github.com/JLugagne/agents-mercato/cmd/mct@latest
 **Self-update:**
 
 ```bash
-mct dist-upgrade
+mct upgrade
 ```
+
+`mct upgrade` downloads the release archive for your platform and checks its SHA-256 against the release `checksums.txt` before atomically replacing the binary. When the release signing key is embedded in mct (`internal/mercato/update/signing_key.asc`), `checksums.txt` must also carry a valid OpenPGP signature (`checksums.txt.sig`) and unsigned releases are refused.
+
+To enable release signing (maintainers): generate a dedicated signing key, add the armored private key and its passphrase as the `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE` repository secrets (the release workflow then signs `checksums.txt`), and commit the armored public key to `internal/mercato/update/signing_key.asc`.
 
 ## Supported tools
 

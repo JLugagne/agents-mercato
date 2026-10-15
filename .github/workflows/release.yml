@@ -11,6 +11,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,3 +30,15 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign checksums
+        if: env.HAS_GPG_KEY == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+            --detach-sign --output dist/checksums.txt.sig dist/checksums.txt
+          gh release upload "$GITHUB_REF_NAME" dist/checksums.txt.sig --clobber

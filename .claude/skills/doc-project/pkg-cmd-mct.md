@@ -30,3 +30,9 @@ commands.NewRootCmd(app) → cobra.Command
 | `cmd/mct/main.go` | Entry point, directory resolution |
 | `internal/mercato/init.go` | `NewApp()` constructor, adapter creation, TUI command |
 | `internal/mercato/assets/embed.go` | Embedded FS placeholder |
+
+## Self-update (`internal/mercato/update`)
+
+- Daily background check (`ShouldCheck` / `CheckLatestVersion`, state in `<cacheDir>/update-check.json`) queries `api.github.com/repos/JLugagne/agents-mercato/releases/latest`; `newerVersion` compares semver (a `dev` build is always older).
+- `RunUpgrade` (`mct upgrade` / `dist-upgrade`) is an in-house updater (`upgrader.go`, no third-party self-update library): download `mct_<os>_<arch>.tar.gz` + `checksums.txt`, verify SHA-256, extract `mct`, write a temp file next to the binary and rename over it.
+- Release signing: when `update/signing_key.asc` (go:embed, empty by default) holds an armored public key, `checksums.txt.sig` is required and verified with `github.com/ProtonMail/go-crypto/openpgp` (armored or binary detached signature). The release workflow signs `checksums.txt` only when the `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE` secrets exist.

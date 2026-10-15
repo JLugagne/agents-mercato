@@ -3,13 +3,11 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
-
-	selfupdate "github.com/creativeprojects/go-selfupdate"
 )
 
 const (
@@ -65,7 +63,7 @@ func CheckLatestVersion(cacheDir, currentVersion string) Result {
 	if err == nil {
 		s.LatestVersion = latest
 		result.LatestVersion = latest
-		result.UpdateAvailable = latest != "" && latest != currentVersion && currentVersion != "dev"
+		result.UpdateAvailable = currentVersion != "dev" && newerVersion(latest, currentVersion)
 	}
 	saveState(cacheDir, s)
 	return result
@@ -76,44 +74,35 @@ func CachedResult(cacheDir, currentVersion string) Result {
 	return Result{
 		CurrentVersion:  currentVersion,
 		LatestVersion:   s.LatestVersion,
-		UpdateAvailable: s.LatestVersion != "" && s.LatestVersion != currentVersion && currentVersion != "dev",
+		UpdateAvailable: currentVersion != "dev" && newerVersion(s.LatestVersion, currentVersion),
 	}
 }
 
 func fetchLatestVersion() (string, error) {
-	updater, err := selfupdate.NewUpdater(selfupdate.Config{})
+	u, err := defaultUpgrader()
 	if err != nil {
 		return "", err
 	}
-	repo := selfupdate.NewRepositorySlug(repoOwner, repoName)
-	release, found, err := updater.DetectLatest(context.Background(), repo)
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "", fmt.Errorf("no release found")
-	}
-	return "v" + release.Version(), nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return u.latestTag(ctx)
 }
 
-// RunUpgrade downloads and replaces the running binary with the latest release.
+// RunUpgrade replaces the running binary with the latest GitHub release when
+// it is newer, after verifying the archive against the release checksums.
 func RunUpgrade(currentVersion string) error {
-	updater, err := selfupdate.NewUpdater(selfupdate.Config{})
+	u, err := defaultUpgrader()
 	if err != nil {
 		return err
 	}
-	repo := selfupdate.NewRepositorySlug(repoOwner, repoName)
-	current := strings.TrimPrefix(currentVersion, "v")
-
-	release, err := updater.UpdateSelf(context.Background(), current, repo)
+	latest, updated, err := u.upgrade(context.Background(), currentVersion)
 	if err != nil {
-		return fmt.Errorf("upgrade failed: %w", err)
+		return errors.Join(errors.New("upgrade failed"), err)
 	}
-	latest := "v" + release.Version()
-	if latest == currentVersion {
-		fmt.Println("  ok  already at latest version", latest)
-	} else {
+	if updated {
 		fmt.Printf("  ok  updated %s → %s\n", currentVersion, latest)
+	} else {
+		fmt.Println("  ok  already at latest version", latest)
 	}
 	return nil
 }

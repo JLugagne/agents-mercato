@@ -45,7 +45,7 @@ jobs:
       image: golang:${{ matrix.go-version }}-alpine
     steps:
       - name: Install build dependencies
-        run: apk add --no-cache gcc musl-dev
+        run: apk add --no-cache gcc musl-dev git
       - uses: actions/checkout@v7
       - name: Cache Go modules
         uses: actions/cache@v6

@@ -18,7 +18,7 @@ func (a *App) Readme(market, path string) (domain.ReadmeEntry, error) {
 		return domain.ReadmeEntry{}, domain.ErrMarketNotFound
 	}
 
-	clonePath := a.clonePath(market)
+	clonePath := a.clonePath(mc.Name)
 	content, err := a.git.ReadFileAtRef(clonePath, mc.Branch, path, "HEAD")
 	if err != nil {
 		return domain.ReadmeEntry{}, &domain.DomainError{
@@ -50,7 +50,7 @@ func (a *App) ListReadmes(market string) ([]domain.ReadmeEntry, error) {
 		return nil, domain.ErrMarketNotFound
 	}
 
-	clonePath := a.clonePath(market)
+	clonePath := a.clonePath(mc.Name)
 	files, err := a.git.ListFiles(clonePath, mc.Branch)
 	if err != nil {
 		return nil, err

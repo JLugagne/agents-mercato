@@ -120,6 +120,11 @@ func findMarketConfig(cfg domain.Config, name string) *domain.MarketConfig {
 			return &cfg.Markets[i]
 		}
 	}
+	for i := range cfg.Markets {
+		if strings.EqualFold(cfg.Markets[i].Name, name) {
+			return &cfg.Markets[i]
+		}
+	}
 	return nil
 }
 
@@ -153,10 +158,8 @@ func (a *App) GetMarket(name string) (domain.Market, error) {
 	if err != nil {
 		return domain.Market{}, err
 	}
-	for _, mc := range cfg.Markets {
-		if mc.Name == name {
-			return marketConfigToMarket(mc, a.cacheDir), nil
-		}
+	if mc := findMarketConfig(cfg, name); mc != nil {
+		return marketConfigToMarket(*mc, a.cacheDir), nil
 	}
 	return domain.Market{}, domain.ErrMarketNotFound
 }
@@ -172,6 +175,7 @@ func (a *App) MarketInfo(name string) (service.MarketInfoResult, error) {
 		return service.MarketInfoResult{}, domain.ErrMarketNotFound
 	}
 
+	name = found.Name
 	market := marketConfigToMarket(*found, a.cacheDir)
 
 	syncState, err := a.state.LoadSyncState(a.cacheDir)
@@ -478,9 +482,11 @@ func (a *App) RemoveMarket(name string, opts service.RemoveMarketOpts) error {
 		return err
 	}
 
-	if findMarketConfig(cfg, name) == nil {
+	found := findMarketConfig(cfg, name)
+	if found == nil {
 		return domain.ErrMarketNotFound
 	}
+	name = found.Name
 
 	if !opts.Force {
 		db, err := a.idb.Load(a.cacheDir)

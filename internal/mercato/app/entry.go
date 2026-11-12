@@ -162,7 +162,7 @@ func (a *App) ReadEntryContent(market, relPath string) ([]byte, error) {
 		return nil, domain.ErrMarketNotFound
 	}
 
-	clonePath := a.clonePath(market)
+	clonePath := a.clonePath(mc.Name)
 	return a.git.ReadFileAtRef(clonePath, mc.Branch, relPath, "HEAD")
 }
 
@@ -179,7 +179,7 @@ func (a *App) ListSkillDirFiles(market, dirPrefix string) ([]domain.SkillDirFile
 		return nil, domain.ErrMarketNotFound
 	}
 
-	clonePath := a.clonePath(market)
+	clonePath := a.clonePath(mc.Name)
 	files, err := a.git.ListDirFiles(clonePath, mc.Branch, dirPrefix)
 	if err != nil {
 		return nil, err
@@ -277,6 +277,7 @@ func (a *App) Add(ref domain.MctRef, opts service.AddOpts) (service.AddResult, e
 	if mc == nil {
 		return service.AddResult{}, domain.ErrMarketNotFound
 	}
+	marketName = mc.Name
 
 	// Lock installdb
 	if err := a.idb.Lock(a.cacheDir); err != nil {

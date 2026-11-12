@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -900,6 +901,20 @@ func TestIntegration_AddAgent_ForceReinstalls(t *testing.T) {
 	}
 	if string(got) != string(original) {
 		t.Errorf("expected forced reinstall to restore the original content, got %q", got)
+	}
+}
+
+func TestIntegration_Add_MarketNameIsCaseInsensitive(t *testing.T) {
+	application, projectDir, _ := setupIntegration(t, multiSkillMarketFiles())
+
+	ref := domain.MctRef(strings.ToUpper(marketName) + "@dev/go/agents/reviewer.md")
+	if _, err := application.Add(ref, service.AddOpts{}); err != nil {
+		t.Fatalf("Add with differently cased market name: %v", err)
+	}
+
+	agentPath := filepath.Join(projectDir, ".claude", "agents", "reviewer.md")
+	if _, err := os.Stat(agentPath); err != nil {
+		t.Errorf("expected agent to be installed: %v", err)
 	}
 }
 

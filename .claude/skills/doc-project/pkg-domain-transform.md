@@ -42,6 +42,7 @@ shims: `tsshim.go`; JSON hook helpers: `jsonhooks.go`; workflow helpers:
 | Tool | Detect | Skills | Agents | Commands | Hooks |
 |---|---|---|---|---|---|
 | claude | — | core path | core path | core path | core path |
+| agents | — (always detected) | shared `.agents/skills/*` | — | skill `.agents/skills/*` | — |
 | opencode | `.opencode`, `opencode.json(c)` | native | `.opencode/agents/*.md` (mode subagent, permission map) | `.opencode/commands/*.md` | TS plugin `.opencode/plugins/mct-*.ts` (v1 API) |
 | kilo | `.kilo`, `.kilocode`, `kilo.json(c)` | `.kilo/skills` | `.kilo/agents/*.md` | `.kilo/commands/*.md` | TS plugin `.kilo/plugin/mct-*.ts` |
 | pi | `.pi` | shared | — | `.pi/prompts/*.md` | TS extension `.pi/extensions/mct-*.ts` |

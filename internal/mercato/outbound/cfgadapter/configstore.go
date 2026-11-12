@@ -46,7 +46,7 @@ func (c *ConfigStoreAdapter) Load(path string) (domain.Config, error) {
 		cfg.StaleAfter = 7 * 24 * 60 * 60 * 1e9
 	}
 	if len(cfg.Tools) == 0 {
-		cfg.Tools = map[string]bool{"claude": true}
+		cfg.Tools = map[string]bool{"claude": true, "agents": true}
 	}
 	for i := range cfg.Markets {
 		if cfg.Markets[i].Branch == "" {

@@ -873,6 +873,36 @@ func TestIntegration_AddAgent_SiblingSkillsIdempotent(t *testing.T) {
 	}
 }
 
+func TestIntegration_AddAgent_ForceReinstalls(t *testing.T) {
+	application, projectDir, _ := setupIntegration(t, multiSkillMarketFiles())
+
+	ref := domain.MctRef(marketName + "@dev/go/agents/reviewer.md")
+	if _, err := application.Add(ref, service.AddOpts{}); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+
+	agentPath := filepath.Join(projectDir, ".claude", "agents", "reviewer.md")
+	original, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	if err := os.WriteFile(agentPath, []byte("locally modified"), 0o644); err != nil {
+		t.Fatalf("modify agent: %v", err)
+	}
+
+	if _, err := application.Add(ref, service.AddOpts{Force: true}); err != nil {
+		t.Fatalf("forced Add: %v", err)
+	}
+
+	got, err := os.ReadFile(agentPath)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("expected forced reinstall to restore the original content, got %q", got)
+	}
+}
+
 func TestIntegration_AddAgent_SiblingSkillsWithDeps(t *testing.T) {
 	// Agent declares a dependency, and profile also has undeclared sibling skills.
 	// Both should be installed.

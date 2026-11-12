@@ -524,3 +524,41 @@ Set them with:
 mct config set conflict_policy block
 mct config set drift_policy prompt
 ```
+
+## Supported tools
+
+Entries are authored once in Claude Code format and converted for every enabled tool that is detected in the project (its marker directory, e.g. `.codex/`, exists). "shared" means `.agents/skills/<name>/`, the cross-tool skills directory, written once for all tools that read it. "native" means the tool already reads the Claude Code files, so nothing extra is written.
+
+| Tool | Skills | Agents | Commands | Hooks |
+| ---- | ------ | ------ | -------- | ----- |
+| `claude` | `.claude/skills/` | `.claude/agents/` | `.claude/commands/` | `.claude/settings.json` |
+| `codex` | shared | `.codex/agents/*.toml` | — | `.codex/hooks.json` |
+| `cursor` | native | native | skill in `.cursor/skills/` | `.cursor/hooks.json` |
+| `copilot` | native | native | skill in `.github/skills/` | `.github/hooks/mct-*.json` |
+| `gemini` | shared | `.gemini/agents/` | `.gemini/commands/*.toml` | `.gemini/settings.json` |
+| `opencode` | native | `.opencode/agents/` | `.opencode/commands/` | plugin `.opencode/plugins/mct-*.ts` |
+| `pi` | shared | — | `.pi/prompts/` | extension `.pi/extensions/mct-*.ts` |
+| `kilo` | `.kilo/skills/` | `.kilo/agents/` | `.kilo/commands/` | plugin `.kilo/plugin/mct-*.ts` |
+| `factory` | shared | `.factory/droids/` | `.factory/commands/` | `.factory/hooks.json` |
+| `qwen` | `.qwen/skills/` | `.qwen/agents/` | `.qwen/commands/` | `.qwen/settings.json` |
+| `kiro` | `.kiro/skills/` | `.kiro/agents/` | skill in `.kiro/skills/` | `.kiro/hooks/mct-*.json` |
+| `windsurf` (Devin Desktop) | shared | — | `.devin/` or `.windsurf/workflows/` | `.devin/` or `.windsurf/hooks.json` |
+| `junie` | shared | `.junie/agents/` | `.junie/commands/` | — |
+| `vibe` (Mistral) | shared | `.vibe/agents/*.toml` | skill in `.vibe/skills/` | — |
+| `antigravity` | shared | — | skill in `.agents/skills/` | `.agents/hooks.json` |
+| `cline` | native | — | `.clinerules/workflows/` | — |
+| `augment` | native | `.augment/agents/` | native | — |
+| `deepcode` (DeepSeek) | `.deepcode/skills/` | — | skill in `.deepcode/skills/` | — |
+| `codewhale` (ex DeepSeek-TUI) | native | `.codewhale/agents/*.toml` | — | — |
+| `zed` | shared | — | — | — |
+| `trae` | `.trae/skills/` | — | — | — |
+| `roocode`, `continue` (legacy) | one rule file per skill | — | — | — |
+
+Amp, Crush and Goose read `.claude/skills/` natively and need no target.
+
+`claude` and `agents` (the shared `.agents/skills/` directory, always written) are enabled by default. Enable others with `mct config set tools.<name> true` (unknown names are rejected). Model and tool names in agents are mapped per tool; override them in `~/.config/mct/tool-mappings.yml`.
+
+Hooks are merged into each tool's settings or hooks file without touching user-authored entries: mct records the exact entry it added so it can update or remove it later. For OpenCode, Kilo and pi, each hook becomes a small TypeScript plugin that runs the hook command and blocks the tool call when it exits with code 2.
+
+Files written by older mct versions (previous tool formats, removed tools, legacy hook entries) are converted automatically by `mct update` / `mct sync`, or explicitly with `mct migrate [--dry-run] [--all-locations]`. Locally modified files are never overwritten.
+

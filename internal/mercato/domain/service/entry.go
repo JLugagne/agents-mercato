@@ -46,6 +46,7 @@ type AddOpts struct {
 	AcceptBreaking bool
 	NoDeps         bool
 	DryRun         bool
+	Force          bool // reinstall even when the entry is already installed, overwriting local changes
 	ConfirmMarket  ConfirmMarketFunc
 	Tools          map[string]bool // per-invocation tool override (e.g. {"opencode": true})
 }

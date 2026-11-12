@@ -347,7 +347,7 @@ func (a *App) addInternal(
 	pkg := db.FindPackage(marketName, profile)
 	if pkg != nil {
 		atLocation := pkg.FindLocation(projectPath) != nil
-		if atLocation && a.entryFileExistsAt(cfg, relPath) && len(opts.Tools) == 0 {
+		if atLocation && a.entryFileExistsAt(cfg, relPath) && len(opts.Tools) == 0 && !opts.Force {
 			return domain.ErrEntryAlreadyInstalled
 		}
 	}
@@ -1189,7 +1189,7 @@ func (a *App) Init(opts service.InitOpts) error {
 
 	cfg := domain.Config{
 		LocalPath: localPath,
-		Tools:     map[string]bool{"claude": true},
+		Tools:     map[string]bool{"claude": true, "agents": true},
 		Markets:   []domain.MarketConfig{},
 	}
 

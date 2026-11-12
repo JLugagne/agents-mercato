@@ -42,7 +42,7 @@ type Services struct {
 | File | Commands | Aliases | Description |
 |------|----------|---------|-------------|
 | `market_cmd.go` | `market add`, `market remove`, `market list`, `market info`, `market set` | `markets` → `market list` | Market lifecycle |
-| `add_cmd.go` | `add <ref>` | `install` | Install entry + deps |
+| `add_cmd.go` | `add <ref>` | `install` | Install entry + deps; `-f/--force` reinstalls an already installed entry, `-g/--global` installs in `~` (`~/.claude`, `~/.agents`), `-t/--tools` overrides targets |
 | `remove_cmd.go` | `remove <ref>` | — | Uninstall entry |
 | `list_cmd.go` | `list` | — | List installed entries |
 | `search_cmd.go` | `search <query>` | — | Full-text search |

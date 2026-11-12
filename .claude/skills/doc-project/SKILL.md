@@ -172,7 +172,7 @@ resuming from `progress`.
 
 Entries are authored for Claude Code; `domain/transform` converts them for
 the tools enabled in config (`tools.<name>: true`, `--tools a,b`) and detected
-in the project (marker dir such as `.codex/`). Unknown tool names are
+in the project (marker dir such as `.codex/`). The `agents` tool (vendor-neutral `.agents/skills`, no detection marker) is enabled by default next to `claude`. Unknown tool names are
 rejected (`ErrUnknownTool`). Skills that several tools read go once to
 `.agents/skills/<name>/` (location type `agents`); tools that read
 `.claude/*` natively get nothing. Hooks become JSON patches inside the tool's

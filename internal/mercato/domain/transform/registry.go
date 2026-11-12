@@ -7,6 +7,7 @@ import "github.com/JLugagne/agents-mercato/internal/mercato/domain"
 func Registry() domain.TransformerRegistry {
 	all := []domain.Transformer{
 		ClaudeTransformer{},
+		AgentsTransformer{},
 		AntigravityTransformer{},
 		AugmentTransformer{},
 		ClineTransformer{},

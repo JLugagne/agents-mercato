@@ -1,296 +1,152 @@
-# mct — A package manager for AI coding agents, skills, commands, and hooks
+# mct — a package manager for AI agents, skills, commands and hooks
 
-Think **npm**, but for the agents, skills, slash commands, and Claude Code hooks consumed by Claude Code, Codex, Cursor, Copilot, Gemini, OpenCode, pi, Kilo, Factory, Qwen, Kiro, Windsurf, and more.
+`mct` installs agents, skills, slash commands and Claude Code hooks from Git repositories ("markets") into your projects or your home directory, keeps them up to date, and converts them for the other AI tools you use (Codex, Cursor, Copilot, Gemini, OpenCode, pi, Kilo, Factory, Qwen, Kiro, Windsurf…).
 
-Install, share, version, and sync agent, skill, command, and hook definitions across your team, your machines, your CI — and across **multiple AI tools at once** — from any Git repository.
+No central registry, no server. Just Git.
 
 <p align="center">
   <img src="docs/screenshot-tui.png" width="700" alt="mct TUI" />
 </p>
 
----
-
-## The problem
-
-Agents and skills are becoming a critical part of how teams build software. They define how your AI reviews code, writes tests, refactors, enforces conventions.
-
-But right now, they are:
-
-- scattered across personal `.claude/`, `.cursor/`, `.windsurf/`, `.codex/`… directories
-- copy-pasted between projects, teammates, and tools
-- duplicated and rewritten for each AI tool you use
-- drifting silently when someone edits a file locally
-- impossible to discover or reuse across teams
-- never in sync between your laptop and CI
-
-Agents and skills are code-adjacent artifacts. They deserve the same tooling as code: versioning, dependencies, distribution, reproducibility — and a single source of truth across tools.
-
-That's what `mct` does.
-
-## The solution
-
-`mct` treats Git repositories as **markets** — sources of agent, skill, command, and hook definitions — and installs them into your project. Each entry is **transformed** at install time into the native format of every AI tool you've enabled (or, for hooks, merged into `.claude/settings.json`).
-
-- **Markets** are Git repos you register as sources
-- **Entries** (agents, skills, slash commands, Claude Code hooks) are installed from markets
-- **Transformers** convert each entry into the correct format and location for every enabled tool (Claude plus 22 other tools, see [Supported tools](#supported-tools))
-- **Dependencies** between skills are resolved automatically
-- **Drift detection** knows when you've modified an installed file locally
-- **Sync** pulls upstream updates and flags conflicts
-- **Search** works across all your markets, fully offline
-- **Save / Restore** makes your whole setup portable in one file
-- **Git hooks** keep your team's setup in sync automatically
-
-No central registry. No server. Just Git.
-
-## Quick example
-
-Register a market and install an agent:
-
-```bash
-mct market add team git@github.com:my-org/claude-agents.git
-mct add team@profile/agents/reviewer
-```
-
-Refs use the `market@path` form: the part before `@` is the market name you registered, the part after is the file path inside the repo.
-
-By default, the entry is installed for Claude Code (`.claude/`). Enable other tools to install it everywhere at once:
-
-```bash
-mct config set tools.codex true
-mct config set tools.opencode true
-mct add team@profile/agents/reviewer
-# Writes .claude/agents/reviewer.md
-#        .codex/agents/reviewer.toml
-#        .opencode/agents/reviewer.md
-```
-
-Save your setup so the rest of the team (and your CI) can reproduce it:
-
-```bash
-mct save
-git add .mct.json
-git commit -m "add mct setup"
-git push
-```
-
-Restore on another machine:
-
-```bash
-git pull
-mct restore
-```
-
-Use in CI:
-
-```yaml
-- name: Restore agents and skills
-  run: mct restore
-
-- name: Run Claude with restored skills
-  run: claude -p "Review this PR" --skills ./.claude/skills
-```
-
-Your agents and skills are consistent everywhere — every laptop, every tool, every CI runner.
-
-## Features
-
-Real features, all implemented today:
-
-- **Multi-tool installation** — write agents, skills, commands and hooks to 23 AI coding tools from a single source
-- **Transformers** — entries are converted to each tool's native format (frontmatter, file extension, directory layout) at install time
-- **Tool mappings** — translate models (`opus`, `sonnet`, `haiku`) and built-in tool names (`Bash`, `Read`, `Edit`…) to each target tool's equivalent. Editable in `~/.config/mct/toolmappings.yml` for power users
-- **Atomic install / update / remove** — every write goes through a per-package staging directory and is promoted in one commit. A crash mid-install never leaves a half-written tree, and a startup recovery pass replays leftover stages from previous crashed runs
-- **Dependency resolution** — skills can declare `requires_skills`, and `mct` installs the full graph. Cross-market deps auto-register the foreign market (with a confirmation prompt outside CI mode), and cycles are detected
-- **Drift detection** — xxhash checksums detect local edits to installed files, so updates never silently overwrite your work. Locally-deleted files are flagged separately (`StateLocallyDeleted`) so `sync` can offer to restore them
-- **Self-healing sync** — `mct sync` prunes stale install locations and upstream-removed files automatically, then offers to **restore any locally-deleted file** interactively (`[r]/[k]/[a]/[n]` per file; `--restore-all` / `--restore-none` flags; CI mode skips silently)
-- **Doctor** — `mct doctor` runs a 100% offline read-only audit and surfaces every issue (modified files, locally-deleted, stale locations, upstream-removed, orphaned packages) in one shot, with `--json` for CI
-- **Conflict handling** — filename collisions across markets, version mismatches on shared deps, and hook `(event, matcher)` collisions are surfaced via `mct conflicts`
-- **Offline BM25 search** with fuzzy matching, across all registered markets
-- **Interactive TUI** for browsing markets and managing installations
-- **Prune** to handle entries deleted upstream — keep locally or remove, tracked via tombstones
-- **Lint** — validate a market repo's structure before publishing (`mct lint`)
-- **SSH support** for private repositories (system SSH agent, `~/.ssh/config`, `known_hosts`)
-- **JSON output** (`--json`) on most commands for scripting and CI
-- **Save / Restore** to a portable `.mct.json` file — share setups across machines and teammates. First run with no config auto-initializes the project
-- **Project-level overrides** — a project `.mct.json` can enable a different subset of tools than your global config; the two are merged at install time
-- **Git hooks** — `mct hook install post-pull` and `mct hook install pre-push` keep `.mct.json` and the local install in sync automatically
-- **Cross-process safe** — the install database uses cross-platform file locking, so two `mct` processes can't corrupt each other's state
-- **Self-update** — `mct dist-upgrade` updates the binary; a daily background check notifies you of new releases
-- **Tracking metadata** injected into frontmatter (`mct_ref`, `mct_version`, `mct_market`, `mct_installed_at`, `mct_checksum`) so installed files are self-describing
-
 ## Install
-
-**Linux / macOS (recommended):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JLugagne/agents-mercato/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/mct` (no root required). Override with `MCT_INSTALL_DIR=/your/path` or pin a version with `MCT_VERSION=v1.3.9`.
+This installs `~/.local/bin/mct` without root. Alternatives: `go install github.com/JLugagne/agents-mercato/cmd/mct@latest`, and `mct upgrade` to update later (the download is checksum-verified).
 
-**Go install:**
-
-```bash
-go install github.com/JLugagne/agents-mercato/cmd/mct@latest
-```
-
-**Self-update:**
+## How it works in 30 seconds
 
 ```bash
-mct upgrade
+mct market add team git@github.com:my-org/agents.git   # register a source
+mct search "code review"                               # find something
+mct add team@dev/go/agents/reviewer.md                 # install it
 ```
 
-`mct upgrade` downloads the release archive for your platform and checks its SHA-256 against the release `checksums.txt` before atomically replacing the binary. When the release signing key is embedded in mct (`internal/mercato/update/signing_key.asc`), `checksums.txt` must also carry a valid OpenPGP signature (`checksums.txt.sig`) and unsigned releases are refused.
-
-To enable release signing (maintainers): generate a dedicated signing key, add the armored private key and its passphrase as the `GPG_PRIVATE_KEY` / `GPG_PASSPHRASE` repository secrets (the release workflow then signs `checksums.txt`), and commit the armored public key to `internal/mercato/update/signing_key.asc`.
-
-## Supported tools
-
-Entries are authored once in Claude Code format and converted for every enabled tool that is detected in the project (its marker directory, e.g. `.codex/`, exists). "shared" means `.agents/skills/<name>/`, the cross-tool skills directory, written once for all tools that read it. "native" means the tool already reads the Claude Code files, so nothing extra is written.
-
-| Tool | Skills | Agents | Commands | Hooks |
-| ---- | ------ | ------ | -------- | ----- |
-| `claude` | `.claude/skills/` | `.claude/agents/` | `.claude/commands/` | `.claude/settings.json` |
-| `codex` | shared | `.codex/agents/*.toml` | — | `.codex/hooks.json` |
-| `cursor` | native | native | skill in `.cursor/skills/` | `.cursor/hooks.json` |
-| `copilot` | native | native | skill in `.github/skills/` | `.github/hooks/mct-*.json` |
-| `gemini` | shared | `.gemini/agents/` | `.gemini/commands/*.toml` | `.gemini/settings.json` |
-| `opencode` | native | `.opencode/agents/` | `.opencode/commands/` | plugin `.opencode/plugins/mct-*.ts` |
-| `pi` | shared | — | `.pi/prompts/` | extension `.pi/extensions/mct-*.ts` |
-| `kilo` | `.kilo/skills/` | `.kilo/agents/` | `.kilo/commands/` | plugin `.kilo/plugin/mct-*.ts` |
-| `factory` | shared | `.factory/droids/` | `.factory/commands/` | `.factory/hooks.json` |
-| `qwen` | `.qwen/skills/` | `.qwen/agents/` | `.qwen/commands/` | `.qwen/settings.json` |
-| `kiro` | `.kiro/skills/` | `.kiro/agents/` | skill in `.kiro/skills/` | `.kiro/hooks/mct-*.json` |
-| `windsurf` (Devin Desktop) | shared | — | `.devin/` or `.windsurf/workflows/` | `.devin/` or `.windsurf/hooks.json` |
-| `junie` | shared | `.junie/agents/` | `.junie/commands/` | — |
-| `vibe` (Mistral) | shared | `.vibe/agents/*.toml` | skill in `.vibe/skills/` | — |
-| `antigravity` | shared | — | skill in `.agents/skills/` | `.agents/hooks.json` |
-| `cline` | native | — | `.clinerules/workflows/` | — |
-| `augment` | native | `.augment/agents/` | native | — |
-| `deepcode` (DeepSeek) | `.deepcode/skills/` | — | skill in `.deepcode/skills/` | — |
-| `codewhale` (ex DeepSeek-TUI) | native | `.codewhale/agents/*.toml` | — | — |
-| `zed` | shared | — | — | — |
-| `trae` | `.trae/skills/` | — | — | — |
-| `roocode`, `continue` (legacy) | one rule file per skill | — | — | — |
-
-Amp, Crush and Goose read `.claude/skills/` natively and need no target.
-
-Only `claude` is enabled by default. Enable others with `mct config set tools.<name> true` (unknown names are rejected). Model and tool names in agents are mapped per tool; override them in `~/.config/mct/tool-mappings.yml`.
-
-Hooks are merged into each tool's settings or hooks file without touching user-authored entries: mct records the exact entry it added so it can update or remove it later. For OpenCode, Kilo and pi, each hook becomes a small TypeScript plugin that runs the hook command and blocks the tool call when it exits with code 2.
-
-Files written by older mct versions (previous tool formats, removed tools, legacy hook entries) are converted automatically by `mct update` / `mct sync`, or explicitly with `mct migrate [--dry-run] [--all-locations]`. Locally modified files are never overwritten.
-
-## Core commands
-
-```bash
-# Markets (sources)
-mct market add <git-url>          # register a Git repo as a market
-mct market list                   # list registered markets
-mct market info <name>            # inspect a market
-mct market set <name> <key> <val> # update a market property (e.g. branch)
-mct market remove <name>
-
-# Install / remove entries
-mct add <market>@<path>           # install an agent, skill, command, or hook (with deps)
-mct add <ref> --dry-run
-mct remove <market>@<path>        # uninstall an entry (also accepts --ref)
-# To install every entry in a profile, use `mct restore` or `mct import`
-
-# Sync
-mct refresh                       # fetch updates + prune stale locations + prune upstream-removed files
-mct update                        # apply pending changes locally
-mct sync                          # refresh + interactive restore-deleted + update
-mct sync --restore-all            # restore every locally-deleted file without prompting
-mct sync --restore-none           # skip the restore phase entirely (CI default)
-mct check                         # show status of installed entries (clean/drift/locally_deleted/...)
-mct doctor                        # offline read-only audit (drift + missing + stale + upstream-removed + orphans)
-mct doctor --json                 # same, machine-readable
-mct prune                         # handle entries fully deleted upstream
-
-# Search
-mct search "security review"
-mct search "cli" --type skill --installed
-mct search "vet" --type hook
-
-# Configuration
-mct config get                    # show current config
-mct config set tools.codex true   # enable a tool target
-mct config set drift_policy prompt
-
-# Portable setup
-mct save                          # write .mct.json in current dir
-mct restore                       # reinstall everything from .mct.json
-mct export setup.json             # export full setup (markets + entries)
-mct import setup.json
-
-# Git hooks (save/restore automation — distinct from Claude Code hook entries)
-mct hook install post-pull        # auto-restore after git pull
-mct hook install pre-push         # auto-save .mct.json before push
-mct hook uninstall <post-pull|pre-push>
-
-# Self-update
-mct dist-upgrade
-
-# TUI
-mct tui
-```
-
-See `mct --help` for the full command list, including `lint`, `conflicts`, `index`, `readme`, and more.
-
-## Why not just use Git?
-
-Git gives you versioned files. It doesn't give you:
-
-- **Multi-tool fan-out** — write the same source entry to Claude, Codex, Cursor, OpenCode, pi and more with one command, each in the right format and location
-- **Dependency resolution** — when installing a skill, its required skills come along automatically
-- **Drift detection** — Git can't tell you that you edited `code-reviewer.md` locally after installing it from a market, and that the upstream has also changed
-- **Multi-repo composition** — using agents from three different repos in one project, with consistent updates
-- **Offline search across sources** — BM25 + fuzzy, no network calls, no data leaving your machine
-- **Reproducible CI** — a single `.mct.json` that pins your markets and installed entries for the whole team
-
-`mct` is built on top of Git. It just makes Git usable for a use case Git wasn't designed for.
+A ref is `market@path`: the market name you registered, then the file path inside the repo. Files are **copied** into your project (`.claude/agents/`, `.claude/skills/`…), so each project owns its copy and `mct` tracks whether you edited it.
 
 ## Use cases
 
-**Team workflows** — share reviewers, conventions, and skills across a team via a single private Git repo.
+### I want a skill or agent in my current project
 
-**Mixed-tool teams** — one developer uses Claude Code, another uses Cursor, a third uses Windsurf. Author skills once in a market, install them everywhere with the same `.mct.json`.
+```bash
+mct add team@dev/go/skills/testing/SKILL.md
+mct add team@dev/go/skills/testing/SKILL.md --dry-run   # preview first
+```
 
-**CI automation** — pin your setup in `.mct.json`, run `mct restore` in CI, get reproducible AI-assisted pipelines regardless of which tool runs.
+Skills the entry depends on are installed with it. If a dependency lives in another market, `mct` offers to register it.
 
-**Multi-machine setups** — keep your personal config in sync across laptop, desktop, and remote dev boxes.
+### I want it available in every project (my personal setup)
 
-**Enterprise environments** — SSH support and fully local search mean internal agents and skills can be shared without any data leaving the company network.
+```bash
+mct add team@dev/go/skills/testing/SKILL.md --global
+```
 
-## Creating a market
+`--global` (`-g`) installs into `~/.claude` and `~/.agents` instead of the current project. To keep these up to date, run `mct sync` from your home directory (`cd ~ && mct sync`).
 
-A market is just a Git repository with a specific layout. See [MARKET.md](./MARKET.md) for the full spec, examples, and details on tool transformations.
+### I use several AI tools, not only Claude Code
 
-## Roadmap
+By default, `mct` writes for Claude Code (`.claude/`) and to the shared `.agents/skills/` directory read by many other tools. Turn on more tools and every install is converted for them:
 
-- Public and private registries
-- Semantic versioning and compatibility checks
-- Signed entries
-- Richer conflict resolution UI in the TUI
-- More tool targets as the ecosystem grows
+```bash
+mct config set tools.codex true
+mct config set tools.opencode true
+mct add team@dev/go/agents/reviewer.md
+# .claude/agents/reviewer.md
+# .codex/agents/reviewer.toml
+# .opencode/agents/reviewer.md
+```
 
-## Scope
+A tool is only written to when it is present in the project (for example a `.codex/` directory exists). To target a tool for a single install: `mct add <ref> --tools codex`. The full list of supported tools and their formats is in [MARKET.md](./MARKET.md).
 
-`mct` writes a **single source-of-truth entry** (Markdown + YAML frontmatter, the format established by the Claude Code ecosystem) into the **native format of every AI coding tool** you use. The goal is to make agents and skills truly portable across the AI tooling landscape, instead of forcing teams to maintain N copies of the same prompt for N tools.
+### I edited an installed skill and want the upstream version back
 
-If your tool isn't supported yet, transformers are small and self-contained — contributions welcome.
+```bash
+mct add team@dev/go/skills/testing/SKILL.md --force
+```
 
-## Feedback
+`--force` (`-f`) reinstalls an entry that is already installed and overwrites your local changes.
 
-Open questions I'd love input on:
+### I want to know what changed upstream
 
-- How should conflicts between multiple markets exposing the same entry be handled?
-- What belongs in a future `mct` standard vs. what should stay market-specific?
-- What's missing for your team or your tool to adopt it?
+```bash
+mct check      # status of everything installed: clean, update available, modified locally…
+mct sync       # fetch, then apply updates
+mct doctor     # offline audit: modified, deleted or orphaned files, in one report
+```
 
-Issues and discussions welcome.
+`mct sync` never overwrites a file you modified without asking. If you deleted an installed file, it offers to restore it. In CI, use `mct sync --restore-none` to skip that prompt.
+
+### I want the whole team (and CI) to get the same setup
+
+On your machine:
+
+```bash
+mct save                    # writes .mct.json
+git add .mct.json && git commit -m "add mct setup" && git push
+```
+
+On a teammate's machine or in CI:
+
+```bash
+git pull
+mct restore                 # reinstalls everything listed in .mct.json
+```
+
+To do it automatically on `git pull` and `git push`:
+
+```bash
+mct hook install post-pull
+mct hook install pre-push
+```
+
+GitHub Actions example:
+
+```yaml
+- name: Restore agents and skills
+  run: mct restore
+```
+
+### I want to remove something
+
+```bash
+mct remove team@dev/go/skills/testing/SKILL.md
+mct prune        # handle entries that were deleted upstream
+```
+
+### I want to publish my own agents and skills
+
+Create a Git repository with this layout and register it with `mct market add`:
+
+```
+my-market/
+  dev/go/
+    agents/reviewer.md
+    skills/testing/SKILL.md
+    commands/release.md
+    hooks/format.json
+```
+
+Check it before you publish with `mct lint <market>`. The full spec is in [MARKET.md](./MARKET.md).
+
+### I prefer browsing to typing
+
+```bash
+mct tui
+```
+
+## Good to know
+
+- **Private repositories**: SSH URLs work with your SSH agent and `~/.ssh/config`.
+- **Scripting**: most commands accept `--json`; use `--ci` to disable interactive prompts.
+- **Old installs**: files written by older `mct` versions are converted automatically by `mct update` / `mct sync`, or explicitly with `mct migrate --dry-run`.
+- **Safety**: installs, updates and removals are atomic; a crash never leaves a half-written tree.
+- **Everything else**: `mct --help` and `mct <command> --help`.
+
+## Contributing
+
+Issues and pull requests are welcome. Each supported tool is a small, self-contained transformer in `internal/mercato/domain/transform/`, so adding a tool is a good first contribution.
 
 ## License
 

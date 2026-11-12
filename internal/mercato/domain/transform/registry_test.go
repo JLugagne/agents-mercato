@@ -10,7 +10,7 @@ import (
 
 func TestRegistry_ListsEverySupportedTool(t *testing.T) {
 	require.Equal(t, []string{
-		"antigravity", "augment", "claude", "cline", "codewhale", "codex", "continue", "copilot", "cursor",
+		"agents", "antigravity", "augment", "claude", "cline", "codewhale", "codex", "continue", "copilot", "cursor",
 		"deepcode", "factory", "gemini", "junie", "kilo", "kiro", "opencode", "pi", "qwen", "roocode",
 		"trae", "vibe", "windsurf", "zed",
 	}, transform.Registry().Names())
@@ -18,7 +18,7 @@ func TestRegistry_ListsEverySupportedTool(t *testing.T) {
 
 func TestRegistry_EveryNonClaudeToolDetectsSomething(t *testing.T) {
 	for name, tr := range transform.Registry() {
-		if name == "claude" {
+		if name == "claude" || name == "agents" {
 			continue
 		}
 		require.NotEmpty(t, tr.Detect(), name)

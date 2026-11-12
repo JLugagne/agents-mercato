@@ -2,7 +2,9 @@ package commands
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -319,6 +321,17 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 			acceptBreaking, _ := cmd.Flags().GetBool("accept-breaking")
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			toolsStr, _ := cmd.Flags().GetString("tools")
+			force, _ := cmd.Flags().GetBool("force")
+			global, _ := cmd.Flags().GetBool("global")
+			if global {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return errors.Join(errors.New("resolve home directory"), err)
+				}
+				if err := os.Chdir(home); err != nil {
+					return errors.Join(errors.New("enter home directory"), err)
+				}
+			}
 			ref := domain.MctRef(args[0])
 			confirmMarket := func(marketURL string) bool {
 				if opts.CI {
@@ -333,6 +346,7 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 			result, err := svc.Entries.Add(ref, service.AddOpts{
 				NoDeps:         noDeps,
 				DryRun:         dryRun,
+				Force:          force,
 				AcceptBreaking: acceptBreaking,
 				ConfirmMarket:  confirmMarket,
 				Tools:          tools,
@@ -362,6 +376,8 @@ func newAddCmd(svc Services, opts *GlobalOpts) *cobra.Command {
 	}
 	cmd.Flags().Bool("no-deps", false, "skip dependency resolution")
 	cmd.Flags().Bool("dry-run", false, "preview install")
+	cmd.Flags().BoolP("force", "f", false, "reinstall an already installed entry, overwriting local changes")
+	cmd.Flags().BoolP("global", "g", false, "install in the home directory (~/.claude, ~/.agents) instead of the current project")
 	cmd.Flags().Bool("accept-breaking", false, "accept breaking changes")
 	cmd.Flags().Bool("json", false, "JSON output")
 	cmd.Flags().StringP("tools", "t", "", "target tools (comma-separated, e.g. opencode,cursor)")

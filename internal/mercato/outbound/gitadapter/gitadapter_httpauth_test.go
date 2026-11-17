@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
@@ -26,6 +27,13 @@ func serveAuthenticatedRepo(t *testing.T) (string, string) {
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git binary required for git http-backend")
+	}
+	execPath, err := exec.Command(gitBin, "--exec-path").Output()
+	if err != nil {
+		t.Skip("git --exec-path failed")
+	}
+	if _, err := os.Stat(filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend")); err != nil {
+		t.Skip("git http-backend not installed")
 	}
 
 	upDir, up := newUpstream(t)

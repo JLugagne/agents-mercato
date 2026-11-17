@@ -152,17 +152,16 @@ func hostKeyCallback() ssh.HostKeyCallback {
 	}
 }
 
-// resolveAuthFromRepo reads the origin remote URL from an opened repo and returns auth.
-func resolveAuthFromRepo(repo *git.Repository) transport.AuthMethod {
+func remoteURL(repo *git.Repository) string {
 	remote, err := repo.Remote("origin")
 	if err != nil || remote == nil {
-		return nil
+		return ""
 	}
 	urls := remote.Config().URLs
 	if len(urls) == 0 {
-		return nil
+		return ""
 	}
-	return resolveAuth(urls[0])
+	return urls[0]
 }
 
 // isPassphraseError returns true when the error indicates the key is

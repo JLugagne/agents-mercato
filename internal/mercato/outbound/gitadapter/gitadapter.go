@@ -86,13 +86,15 @@ func (a *Adapter) Clone(url, clonePath string) error {
 	if isSSHURL(url) && !a.sshEnabled {
 		return domain.ErrSSHDisabled
 	}
-	_, err := git.PlainClone(clonePath, false, &git.CloneOptions{
-		URL:      url,
-		Auth:     resolveAuth(url),
-		Depth:    a.depth,
-		Progress: a.progress,
+	return withHTTPCredentials(url, func(auth transport.AuthMethod) error {
+		_, err := git.PlainClone(clonePath, false, &git.CloneOptions{
+			URL:      url,
+			Auth:     auth,
+			Depth:    a.depth,
+			Progress: a.progress,
+		})
+		return err
 	})
-	return err
 }
 
 // resolveBranchRef resolves a branch reference, trying the remote tracking ref
@@ -173,23 +175,26 @@ func (a *Adapter) Fetch(clonePath, branch string) (string, error) {
 		return "", fmt.Errorf("open repo: %w", err)
 	}
 
-	if !a.sshEnabled {
-		if remote, rErr := repo.Remote("origin"); rErr == nil && remote != nil {
-			if urls := remote.Config().URLs; len(urls) > 0 && isSSHURL(urls[0]) {
-				return "", domain.ErrSSHDisabled
-			}
-		}
+	originURL := remoteURL(repo)
+	if !a.sshEnabled && isSSHURL(originURL) {
+		return "", domain.ErrSSHDisabled
 	}
 
-	err = repo.Fetch(&git.FetchOptions{
-		Auth:     resolveAuthFromRepo(repo),
-		Depth:    a.depth,
-		Prune:    true,
-		Force:    false,
-		Progress: a.progress,
+	err = withHTTPCredentials(originURL, func(auth transport.AuthMethod) error {
+		fErr := repo.Fetch(&git.FetchOptions{
+			Auth:     auth,
+			Depth:    a.depth,
+			Prune:    true,
+			Force:    false,
+			Progress: a.progress,
+		})
+		if errors.Is(fErr, git.NoErrAlreadyUpToDate) {
+			return nil
+		}
+		return fErr
 	})
-	if err != nil && err != git.NoErrAlreadyUpToDate {
-		return "", fmt.Errorf("fetch: %w", err)
+	if err != nil {
+		return "", errors.Join(errors.New("fetch"), err)
 	}
 
 	ref, err := resolveBranchRef(repo, branch)
@@ -589,7 +594,6 @@ func (a *Adapter) ValidateRemote(url string) error {
 	if isSSHURL(url) && !a.sshEnabled {
 		return domain.ErrSSHDisabled
 	}
-	auth := resolveAuth(url)
 	ep, err := transport.NewEndpoint(url)
 	if err != nil {
 		return err
@@ -598,11 +602,13 @@ func (a *Adapter) ValidateRemote(url string) error {
 	if err != nil {
 		return err
 	}
-	sess, err := cli.NewUploadPackSession(ep, auth)
-	if err != nil {
+	return withHTTPCredentials(url, func(auth transport.AuthMethod) error {
+		sess, err := cli.NewUploadPackSession(ep, auth)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = sess.Close() }()
+		_, err = sess.AdvertisedReferences()
 		return err
-	}
-	defer func() { _ = sess.Close() }()
-	_, err = sess.AdvertisedReferences()
-	return err
+	})
 }

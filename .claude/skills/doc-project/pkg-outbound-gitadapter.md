@@ -27,7 +27,7 @@ The adapter keeps a `sync.RWMutex` per clone directory (`cloneLocks`). `Clone` a
 
 | Method | Description |
 |--------|-------------|
-| `Clone(url, path, branch)` | Shallow clone with optional SSH auth |
+| `Clone(url, path, branch)` | Shallow clone with optional SSH auth, HTTP auth via git credential helpers |
 | `DefaultBranch(path)` | Branch the clone tracks: symbolic HEAD, else `origin/HEAD`, else the only `origin/*` or local branch, else probe `main` then `master`; errors if none resolve (HEAD is detached after `Fetch`) |
 | `Fetch(path, branch)` | Fetch updates from remote |
 | `DiffSinceCommit(path, sha)` | Compute file changes since a commit |
@@ -40,13 +40,17 @@ The adapter keeps a `sync.RWMutex` per clone directory (`cloneLocks`). `Clone` a
 | `ReadMarketFiles(path, branch)` | Read all market entries in one pass |
 | `ListDirFiles(path, dir, ref)` | List files in a specific directory at a ref |
 
+### credentials.go — HTTP(S) credentials
+
+go-git ignores git's credential helpers, so `Clone`, `Fetch` and `ValidateRemote` run through `withHTTPCredentials`: the first attempt is anonymous; on an HTTP 401/403 for an `http(s)://` URL it runs `git credential fill` (configured helpers, `GIT_ASKPASS`, `core.askPass`; `GIT_TERMINAL_PROMPT=0` so it never prompts on the TTY), retries once with Basic auth, then `git credential approve` on success or `reject` on a new auth failure — same contract as `git clone`. If git is missing or no credential is found, the original auth error is returned.
+
 ### helpers.go — SSH & Git Utilities
 
 | Function | Description |
 |----------|-------------|
 | `isSSHURL(url)` | Detect SSH URL format |
 | `resolveAuth(url)` | Build SSH auth for clone operations |
-| `resolveAuthFromRepo(path)` | Build SSH auth from existing repo remote |
+| `remoteURL(repo)` | Origin remote URL of an opened repo (empty if none) |
 | SSH key loading | Tries `~/.ssh/` keys: ed25519, ecdsa, rsa |
 | SSH config parsing | Reads `~/.ssh/config` for per-host IdentityFile |
 | SSH agent support | Loads from `SSH_AUTH_SOCK` |
